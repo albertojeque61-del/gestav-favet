@@ -1,5 +1,5 @@
 """
-Autenticação local — PBKDF2-SHA256.
+Autenticação local (PBKDF2-SHA256).
 Os utilizadores ficam armazenados no PostgreSQL do Supabase, mas a
 validação da palavra-passe faz-se do lado da aplicação, mantendo o
 requisito RNF4 (hash + salt).
@@ -70,9 +70,9 @@ def criar_admin_padrao():
     with conectar() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM utilizadores")
-            if cur.fetchone()["n"] == 0:
-                conn.close()  # fechar para registar_utilizador abrir nova
-                registar_utilizador("admin", "Administrador do Sistema",
-                                   "admin123", papel="administrador")
-                return True
-    return False
+            existe_algum = cur.fetchone()["n"] > 0
+    if existe_algum:
+        return False
+    registar_utilizador("admin", "Administrador do Sistema",
+                        "admin123", papel="administrador")
+    return True

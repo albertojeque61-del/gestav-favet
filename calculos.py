@@ -1,5 +1,5 @@
 """
-Camada de lógica — cálculo dos indicadores técnicos e económicos.
+Camada de lógica: cálculo dos indicadores técnicos e económicos.
 """
 
 from database import conectar, obter_referencia
@@ -241,7 +241,7 @@ def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
 
 
 # ----------------------------------------------------------------------
-# Comparação com referência Ross 308 — semáforos
+# Comparação com referência Ross 308: semáforos
 # ----------------------------------------------------------------------
 
 def semaforos(ciclo_id: int) -> dict:

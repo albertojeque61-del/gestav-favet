@@ -8,6 +8,11 @@ devolve a lista de alertas gerados (nível + mensagem + recomendação).
 from database import conectar
 
 
+def _v(valor, casas=1):
+    """Número com vírgula decimal (ex.: 30,1)."""
+    return f"{valor:.{casas}f}".replace(".", ",")
+
+
 # ---------------- Regras ----------------
 
 def _mortalidade_anormal(ciclo_id, reg):
@@ -29,7 +34,7 @@ def _mortalidade_anormal(ciclo_id, reg):
         return {
             "nivel": "critico",
             "titulo": "Mortalidade anormal",
-            "mensagem": f"Morreram {reg['mortalidade']} aves hoje ({pct_dia:.2f}% das aves vivas).",
+            "mensagem": f"Morreram {reg['mortalidade']} aves hoje ({_v(pct_dia, 2)}% das aves vivas).",
             "recomendacao": "Investigar imediatamente a causa: avaliar sinais de doença, verificar temperatura, disponibilidade de água, estado da ração e densidade. Contactar médico veterinário se o padrão persistir no dia seguinte.",
         }
     return None
@@ -47,11 +52,11 @@ def _stress_termico(ciclo_id, reg):
                "por zonas de sombra. Em casos extremos, considerar "
                "retirar parte do lote para zona exterior com sombra.")
         if humid and humid >= 70:
-            rec = "Humidade também elevada — risco de golpe de calor. " + rec
+            rec = "Humidade também elevada, com risco de golpe de calor. " + rec
         return {
             "nivel": "critico",
             "titulo": "Stress térmico severo",
-            "mensagem": f"Temperatura máxima registada: {temp:.1f} °C" +
+            "mensagem": f"Temperatura máxima registada: {_v(temp, 1)} °C" +
                         (f" (humidade {humid:.0f}%)" if humid else "") + ".",
             "recomendacao": rec,
         }
@@ -59,7 +64,7 @@ def _stress_termico(ciclo_id, reg):
         return {
             "nivel": "aviso",
             "titulo": "Temperatura elevada",
-            "mensagem": f"Temperatura máxima: {temp:.1f} °C — acima do conforto térmico.",
+            "mensagem": f"Temperatura máxima: {_v(temp, 1)} °C, acima do conforto térmico.",
             "recomendacao": "Reforçar ventilação e verificar se o número de bebedouros é suficiente para a densidade actual. Monitorizar comportamento das aves.",
         }
     return None
@@ -87,7 +92,7 @@ def _queda_consumo_racao(ciclo_id, reg):
         return {
             "nivel": "aviso",
             "titulo": "Queda no consumo de ração",
-            "mensagem": f"Consumo de hoje ({reg['consumo_racao_kg']:.1f} kg) está {queda_pct:.0f}% abaixo da média dos últimos 7 dias ({media:.1f} kg).",
+            "mensagem": f"Consumo de hoje ({_v(reg['consumo_racao_kg'], 1)} kg) está {queda_pct:.0f}% abaixo da média dos últimos 7 dias ({_v(media, 1)} kg).",
             "recomendacao": "Verificar disponibilidade e qualidade da água, estado dos comedouros, temperatura ambiente e eventuais sinais de doença. Pode ser prenúncio de problema sanitário.",
         }
     return None
@@ -139,7 +144,7 @@ def _densidade_elevada(ciclo_id, reg):
         return {
             "nivel": "aviso",
             "titulo": "Densidade elevada",
-            "mensagem": f"Densidade actual: {densidade:.1f} aves/m² (limite recomendado: 12 aves/m²).",
+            "mensagem": f"Densidade actual: {_v(densidade, 1)} aves/m² (limite recomendado: 12 aves/m²).",
             "recomendacao": "Considerar divisão do lote por mais compartimentos, reforço de ventilação e aumento proporcional do nº de bebedouros e comedouros.",
         }
     return None

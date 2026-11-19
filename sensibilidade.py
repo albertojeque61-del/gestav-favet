@@ -1,5 +1,5 @@
 """
-Análise de sensibilidade — simula variações de preço de venda e de preço
+Análise de sensibilidade: simula variações de preço de venda e de preço
 de ração para avaliar o impacto na margem líquida.
 """
 

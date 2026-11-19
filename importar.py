@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from database import conectar
+import estilo as ui
 
 
 # ----------------------------------------------------------------------
@@ -327,17 +328,14 @@ def importar_para_bd(abas: dict, utilizador_id: int) -> dict:
 # ----------------------------------------------------------------------
 
 def pagina_importar():
-    st.title("📥 Importar ciclo histórico")
-
-    st.markdown(
-        "Esta secção permite carregar um **ciclo passado** a partir de um "
-        "ficheiro Excel. Serve para analisar ciclos que já aconteceram "
-        "(resultados, custos, mortalidade, consumo de ração) e perceber "
-        "o que se poderia ter feito de diferente."
+    ui.cabecalho(
+        "Importar ciclo histórico",
+        "Carregue um ciclo passado a partir de um ficheiro Excel para analisar "
+        "resultados, custos e mortalidade, e perceber o que se poderia ter feito de diferente.",
+        "Ciclos",
     )
 
-    st.divider()
-    st.subheader("1 · Descarregar o modelo Excel")
+    ui.secao("1 · Descarregar o modelo Excel")
 
     st.markdown(
         "Comece por descarregar o ficheiro-modelo, preencha com os dados "
@@ -346,48 +344,47 @@ def pagina_importar():
 
     template_bytes = gerar_template_excel()
     st.download_button(
-        "⬇️ Descarregar modelo Excel",
+        "Descarregar modelo Excel",
         data=template_bytes,
         file_name="GESTAV_modelo_importacao.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
+        icon=":material/download:",
     )
 
     with st.expander("Como preencher cada aba"):
         st.markdown("""
 **Aba `ciclo` (obrigatória, uma só linha)**
-- `codigo` — identificador único do ciclo (ex.: `C202510`)
-- `data_inicio` — data de alojamento das aves (formato `AAAA-MM-DD`)
-- `n_aves_alojadas` — número de pintos no início do ciclo
-- `linhagem` — Ross 308, Cobb 500, Hubbard ou Outra
-- `sexo` — Misto, Macho ou Fêmea
-- `observacoes` — opcional
+- `codigo`: identificador único do ciclo (ex.: `C202510`)
+- `data_inicio`: data de alojamento das aves (formato `AAAA-MM-DD`)
+- `n_aves_alojadas`: número de pintos no início do ciclo
+- `linhagem`: Ross 308, Cobb 500, Hubbard ou Outra
+- `sexo`: Misto, Macho ou Fêmea
+- `observacoes`: opcional
 
 **Aba `registo_diario` (opcional, uma linha por dia)**
-- `data`, `mortalidade`, `consumo_racao_kg` — obrigatórias
+- `data`, `mortalidade`, `consumo_racao_kg`: obrigatórias
 - `temp_max`, `temp_min`, `humidade`, `estado_agua`,
   `estado_electricidade`, `n_bebedouros`, `n_comedouros`, `area_m2`,
-  `observacoes` — opcionais
+  `observacoes`: opcionais
 
 **Aba `pesagens` (opcional, uma linha por pesagem)**
-- `data`, `n_aves_amostra`, `peso_total_kg` — todas obrigatórias
+- `data`, `n_aves_amostra`, `peso_total_kg`: todas obrigatórias
 - O peso médio em gramas é calculado automaticamente
 
 **Aba `custos` (opcional, uma linha por custo)**
-- `data`, `categoria`, `tipo` (variável/fixo), `valor_mzn` — obrigatórias
-- `descricao` — opcional
+- `data`, `categoria`, `tipo` (variável/fixo), `valor_mzn`: obrigatórias
+- `descricao`: opcional
 
 **Aba `vendas` (opcional, uma linha por venda)**
-- `data`, `n_aves`, `peso_total_kg`, `preco_por_kg` — obrigatórias
-- `cliente` — opcional
+- `data`, `n_aves`, `peso_total_kg`, `preco_por_kg`: obrigatórias
+- `cliente`: opcional
 
 > O ciclo será importado como **encerrado**, para ficar disponível para
 > análise. Pode reactivá-lo em **Ver ciclos** se precisar de continuar
 > a lançar dados.
 """)
 
-    st.divider()
-    st.subheader("2 · Carregar o ficheiro preenchido")
+    ui.secao("2 · Carregar o ficheiro preenchido")
 
     ficheiro = st.file_uploader(
         "Seleccione o ficheiro Excel (.xlsx)",
@@ -417,11 +414,10 @@ def pagina_importar():
     for nome in ["ciclo", "registo_diario", "pesagens", "custos", "vendas"]:
         if nome in abas and not abas[nome].empty:
             n = len(abas[nome])
-            with st.expander(f"Aba `{nome}` — {n} linha(s)"):
-                st.dataframe(abas[nome], use_container_width=True, hide_index=True)
+            with st.expander(f"Aba `{nome}`: {n} linha(s)"):
+                st.dataframe(abas[nome], width="stretch", hide_index=True)
 
-    st.divider()
-    st.subheader("3 · Confirmar importação")
+    ui.secao("3 · Confirmar importação")
 
     st.warning(
         "Verifique que os dados estão correctos antes de importar. "

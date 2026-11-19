@@ -1,5 +1,5 @@
 """
-Camada de persistência — PostgreSQL hospedado no Supabase.
+Camada de persistência: PostgreSQL hospedado no Supabase.
 A URL de conexão é lida primeiro de st.secrets (deploy em Streamlit
 Cloud) e, se não existir, de uma variável de ambiente SUPABASE_DB_URL
 carregada do ficheiro .env (desenvolvimento local).
@@ -40,6 +40,24 @@ if not SUPABASE_DB_URL:
 def conectar():
     conn = psycopg2.connect(SUPABASE_DB_URL, cursor_factory=RealDictCursor)
     return conn
+
+
+def ler_df(sql: str, conn, params=None):
+    """Executa uma consulta e devolve um DataFrame.
+
+    Substitui pd.read_sql_query, que com o RealDictCursor devolvia o nome
+    das colunas em vez dos valores.
+    """
+    import pandas as pd
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        colunas = [d[0] for d in cur.description]
+        linhas = cur.fetchall()
+    df = pd.DataFrame([[l[c] for c in colunas] for l in linhas], columns=colunas)
+    for c in df.columns:
+        if df[c].dtype == object or str(df[c].dtype).startswith("str"):
+            df[c] = df[c].fillna("")
+    return df
 
 
 def inicializar_bd():

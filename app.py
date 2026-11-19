@@ -1,186 +1,375 @@
 """
-GESTAV — Sistema de Gestão Técnico-Económica da Unidade Avícola
-FAVET — Universidade Eduardo Mondlane
+GESTAV · Sistema de Gestão Técnico-Económica da Granja da FAVET-UEM
+Faculdade de Veterinária, Universidade Eduardo Mondlane
 Autor: Alberto Jeque Júnior
 Licenciatura em Ciência e Tecnologia Animal
 """
 
-import streamlit as st
-import pandas as pd
-from datetime import datetime, date, timedelta
 import os
+from datetime import datetime, date
 
-from database import conectar, inicializar_bd
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from database import conectar, inicializar_bd, ler_df
 from auth import validar_credenciais, criar_admin_padrao, registar_utilizador
-from calculos import (
-    resumo_ciclo, semaforos, mortalidade_acumulada,
-    conversao_alimentar, ganho_medio_diario, iep,
-    custos_totais, receitas_totais, margens, ponto_equilibrio,
-)
+from calculos import resumo_ciclo, semaforos, custos_totais, receitas_totais
 from sensibilidade import tabela_cenarios, simular
 from relatorios import gerar_relatorio_ciclo
 from motor_alertas import (
     avaliar, guardar_alertas, listar_alertas_abertos, resolver_alerta,
 )
 from importar import pagina_importar
+import estilo as ui
+from estilo import P, num, mzn, icone
 
 
 # ======================================================================
 # Configuração da página
 # ======================================================================
 st.set_page_config(
-    page_title="GESTAV — FAVET/UEM",
+    page_title="GESTAV · FAVET-UEM",
     page_icon="🐔",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+ui.aplicar_estilo()
 
-# Inicializar BD na primeira execução
-inicializar_bd()
-criar_admin_padrao()
+
+@st.cache_resource(show_spinner=False)
+def _preparar_bd():
+    """Cria as tabelas e o utilizador admin uma única vez por sessão do servidor."""
+    inicializar_bd()
+    criar_admin_padrao()
+    return True
+
+
+_preparar_bd()
 
 
 # ======================================================================
-# Autenticação
+# Auxiliares de dados
+# ======================================================================
+def _ciclos(apenas_activos: bool = False) -> list[dict]:
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            q = "SELECT * FROM ciclos"
+            if apenas_activos:
+                q += " WHERE estado = 'activo'"
+            q += " ORDER BY data_inicio DESC"
+            cur.execute(q)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _selecionar_ciclo(label: str = "Ciclo", apenas_activos: bool = False,
+                      chave: str | None = None) -> int | None:
+    ciclos = _ciclos(apenas_activos)
+    if not ciclos:
+        ui.vazio("Ainda não há ciclos disponíveis. Crie um ciclo novo ou importe um ciclo histórico.")
+        return None
+    opcoes = {
+        f"{c['codigo']}  ·  início {c['data_inicio']}  ·  {c['estado']}": c["id"]
+        for c in ciclos
+    }
+    escolha = st.selectbox(label, list(opcoes.keys()), key=chave)
+    return opcoes[escolha]
+
+
+def _referencia(linhagem: str) -> pd.DataFrame:
+    with conectar() as conn:
+        return ler_df(
+            "SELECT dia, peso_medio_g FROM parametros_referencia "
+            "WHERE linhagem = %s ORDER BY dia",
+            conn, params=(linhagem,),
+        )
+
+
+def _dia_ciclo(ciclo: dict, resumo: dict) -> int:
+    """Dia actual para ciclos activos; para ciclos encerrados, o último dia com dados."""
+    if ciclo.get("estado") == "activo":
+        inicio = datetime.strptime(ciclo["data_inicio"], "%Y-%m-%d").date()
+        return max(0, (date.today() - inicio).days)
+    return resumo["dia_ciclo"]
+
+
+def _cartoes_margem(r: dict) -> list[str]:
+    if not r["receita"]:
+        return [
+            ui.kpi_html("Margem bruta", "–", "", "ainda sem vendas registadas", "percent", "neutro"),
+            ui.kpi_html("Margem líquida", "–", "", "ainda sem vendas registadas", "percent", "neutro"),
+        ]
+    tb = "verde" if r["margem_bruta"] >= 0 else "verm"
+    tl = "verde" if r["margem_liquida"] >= 0 else "verm"
+    return [
+        ui.kpi_html("Margem bruta", num(r["margem_bruta_pct"], 1), "%", mzn(r["margem_bruta"]), "percent", tb),
+        ui.kpi_html("Margem líquida", num(r["margem_liquida_pct"], 1), "%", mzn(r["margem_liquida"]), "percent", tl),
+    ]
+
+
+def _ir_para(pagina: str):
+    st.session_state.pagina = pagina
+
+
+# ======================================================================
+# Ecrã de entrada
 # ======================================================================
 def tela_login():
-    st.markdown("<h1 style='text-align:center;'>GESTAV</h1>", unsafe_allow_html=True)
-    st.markdown(
-        "<p style='text-align:center; color:#666;'>"
-        "Sistema de Gestão Técnico-Económica da Unidade Avícola<br>"
-        "<small>FAVET — Universidade Eduardo Mondlane</small></p>",
-        unsafe_allow_html=True,
-    )
-    st.divider()
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
+    esq, dir_ = st.columns([1.15, 1], gap="large")
+    with esq:
+        itens = [
+            ("pulso", "Registo diário com alertas automáticos"),
+            ("subida", "Indicadores técnicos comparados com Ross 308"),
+            ("carteira", "Custos, receitas e margens por ciclo"),
+            ("camada", "Análise de ciclos passados e cenários"),
+        ]
+        lista = "".join(
+            f"<li><span>{icone(i, 15, '#F3D9A6')}</span>{t}</li>" for i, t in itens
+        )
+        st.markdown(
+            f"""<div class="gv-login-arte">
+            <div>{ui.logo_svg(56)}
+            <h1>GESTAV</h1>
+            <p class="lema">Gestão técnico-económica da produção de frangos de corte na granja da FAVET-UEM.</p>
+            <ul>{lista}</ul></div>
+            <footer>Faculdade de Veterinária · Universidade Eduardo Mondlane</footer>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with dir_:
+        st.markdown(
+            '<div class="gv-login-titulo"><h2>Iniciar sessão</h2>'
+            "<p>Entre com o seu utilizador para aceder ao painel da granja.</p></div>",
+            unsafe_allow_html=True,
+        )
         with st.form("login"):
-            st.subheader("Iniciar sessão")
-            u = st.text_input("Utilizador")
-            p = st.text_input("Palavra-passe", type="password")
-            if st.form_submit_button("Entrar", use_container_width=True, type="primary"):
-                dados = validar_credenciais(u, p)
+            u = st.text_input("Utilizador", placeholder="ex.: admin")
+            p = st.text_input("Palavra-passe", type="password", placeholder="••••••••")
+            if st.form_submit_button("Entrar", type="primary", width="stretch",
+                                     icon=":material/login:"):
+                dados = validar_credenciais(u.strip(), p)
                 if dados:
                     st.session_state.user = dados
+                    st.session_state.pagina = "inicio"
                     st.rerun()
                 else:
-                    st.error("Credenciais inválidas.")
-
-        st.info("**Primeiro acesso:** utilizador `admin`, palavra-passe `admin123`")
+                    st.error("Utilizador ou palavra-passe incorrectos.")
+        st.markdown(
+            '<div class="gv-dica-acesso"><b>Primeiro acesso:</b> utilizador '
+            "<code>admin</code> e palavra-passe <code>admin123</code>. "
+            "Mude a palavra-passe depois de entrar.</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # ======================================================================
-# Módulos
+# Início
+# ======================================================================
+def modulo_inicio():
+    user = st.session_state.user
+    activos = _ciclos(apenas_activos=True)
+    alertas = listar_alertas_abertos()
+    criticos = [a for a in alertas if a["nivel"] == "critico"]
+    aves = sum(c["n_aves_alojadas"] for c in activos)
+    primeiro_nome = user["nome_completo"].split()[0] if user["nome_completo"] else ""
+
+    st.markdown(
+        f"""<div class="gv-hero">
+        <div class="marca-agua">{ui.logo_svg(190)}</div>
+        <div class="data">{ui.data_extenso()}</div>
+        <h1>{ui.saudacao()}, {primeiro_nome}.</h1>
+        <p>Este é o ponto de partida da gestão da granja: registe o dia, acompanhe os
+        indicadores e responda aos alertas antes que os problemas cresçam.</p>
+        <div class="gv-hero-stats">
+          <div><b>{len(activos)}</b>ciclo(s) em curso</div>
+          <div><b>{num(aves)}</b>aves alojadas</div>
+          <div><b>{len(alertas)}</b>alerta(s) abertos</div>
+          <div><b>{len(criticos)}</b>crítico(s)</div>
+        </div></div>""",
+        unsafe_allow_html=True,
+    )
+
+    ui.secao("Acções rápidas")
+    with st.container(key="atalhos"):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.button("Registar o dia", icon=":material/edit_note:", width="stretch",
+                  on_click=_ir_para, args=("registo",))
+        c2.button("Nova pesagem", icon=":material/scale:", width="stretch",
+                  on_click=_ir_para, args=("pesagens",))
+        c3.button("Ver alertas", icon=":material/notifications:", width="stretch",
+                  on_click=_ir_para, args=("alertas",))
+        c4.button("Novo ciclo", icon=":material/add_circle:", width="stretch",
+                  on_click=_ir_para, args=("novo",))
+
+    ui.secao("Ciclos em curso", "situação actual de cada lote")
+    if not activos:
+        ui.vazio("Não há ciclos activos neste momento. Comece por criar um ciclo novo.")
+        return
+
+    cartoes = []
+    for c in activos:
+        r = resumo_ciclo(c["id"])
+        semas = semaforos(c["id"])
+        estado = "verde"
+        if semas:
+            cores = [v[2][0] for v in semas.values()]
+            estado = "verm" if "vermelho" in cores else ("amar" if "amarelo" in cores else "verde")
+        n_al = len([a for a in alertas if a["ciclo_id"] == c["id"]])
+        nota = f"{n_al} alerta(s) aberto(s)" if n_al else "sem alertas abertos"
+        cartoes.append(ui.kpi_html(
+            f"Ciclo {c['codigo']} · dia {_dia_ciclo(c, r)}",
+            num(r["aves_vivas"]), "aves vivas",
+            f"Mortalidade {num(r['mortalidade_pct'], 1)}% · peso {num(r['peso_actual_g'])} g · {nota}",
+            "ovo", estado,
+        ))
+    ui.grelha(cartoes, minimo=300, preencher=True)
+
+
+# ======================================================================
+# Painel do ciclo
 # ======================================================================
 def modulo_dashboard():
-    st.title("📊 Dashboard")
+    ui.cabecalho("Painel do ciclo",
+                 "Indicadores técnicos e económicos do lote seleccionado, comparados com a referência da linhagem.",
+                 "Visão geral")
 
-    # Banner de alertas no topo
     alertas_abertos = listar_alertas_abertos()
     criticos = [a for a in alertas_abertos if a["nivel"] == "critico"]
     if criticos:
-        st.error(f"🔴 **{len(criticos)} alerta(s) crítico(s) aberto(s)** — veja o módulo Alertas para intervenção imediata.")
-        with st.expander("Ver resumo"):
-            for a in criticos[:5]:
-                st.markdown(f"- **[{a['ciclo_codigo']}]** {a['titulo']}: {a['mensagem']}")
+        ui.faixa_alerta(len(criticos))
 
-    with conectar() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM ciclos ORDER BY data_inicio DESC")
-            ciclos = cur.fetchall()
-
+    ciclos = _ciclos()
     if not ciclos:
-        st.info("Ainda não há ciclos registados. Crie um novo ciclo no menu lateral.")
+        ui.vazio("Ainda não há ciclos registados. Crie um ciclo novo no menu lateral.")
         return
 
-    activos = [c for c in ciclos if c["estado"] == "activo"]
-    encerrados = [c for c in ciclos if c["estado"] == "encerrado"]
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Ciclos activos", len(activos))
-    col2.metric("Ciclos encerrados", len(encerrados))
-    col3.metric("Total de ciclos", len(ciclos))
-
-    st.divider()
-
-    # Ciclo seleccionado
-    opcoes = {f"{c['codigo']} — {c['data_inicio']} ({c['estado']})": c["id"] for c in ciclos}
-    escolha = st.selectbox("Seleccionar ciclo", list(opcoes.keys()))
-    cid = opcoes[escolha]
-
+    cid = _selecionar_ciclo("Ciclo em análise", chave="dash_ciclo")
+    ciclo = next(c for c in ciclos if c["id"] == cid)
     r = resumo_ciclo(cid)
 
-    st.subheader("Indicadores técnicos")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Dia do ciclo", r["dia_ciclo"])
-    c2.metric("Aves vivas", f"{r['aves_vivas']:,}".replace(",", "."))
-    c3.metric("Peso médio (g)", f"{r['peso_actual_g']:.0f}")
-    c4.metric("GMD (g/dia)", f"{r['gmd']:.1f}")
+    ui.secao("Indicadores técnicos")
+    tom_mort = "verde" if r["mortalidade_pct"] <= 5 else ("amar" if r["mortalidade_pct"] <= 8 else "verm")
+    ui.grelha([
+        ui.kpi_html("Dia do ciclo", str(_dia_ciclo(ciclo, r)), "dias", f"início em {ciclo['data_inicio']}", "calendario", "neutro"),
+        ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", f"de {num(ciclo['n_aves_alojadas'])} alojadas", "ovo", "verde"),
+        ui.kpi_html("Peso médio", num(r["peso_actual_g"]), "g", "última pesagem", "peso", "verde"),
+        ui.kpi_html("Ganho médio diário", num(r["gmd"], 1), "g/dia", "", "subida", "verde"),
+        ui.kpi_html("Mortalidade", num(r["mortalidade_pct"], 1), "%", f"{num(r['mortalidade_total'])} aves", "pulso", tom_mort),
+        ui.kpi_html("Viabilidade", num(r["viabilidade_pct"], 1), "%", "", "escudo", "verde"),
+        ui.kpi_html("Conversão alimentar", num(r["ica"], 2), "", "kg ração por kg de peso", "ciclo", "ouro"),
+        ui.kpi_html("Índice de eficiência", num(r["iep"]), "", "IEP", "medalha", "ouro"),
+    ])
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Mortalidade", f"{r['mortalidade_pct']}%")
-    c2.metric("Viabilidade", f"{r['viabilidade_pct']}%")
-    c3.metric("ICA", f"{r['ica']:.2f}")
-    c4.metric("IEP", f"{r['iep']:.0f}")
+    ui.secao("Indicadores económicos")
+    ui.grelha([
+        ui.kpi_html("Custo total", num(r["custo_total"]), "MZN", f"{mzn(r['custo_por_ave'], 2)} por ave", "carteira", "ouro"),
+        ui.kpi_html("Receita", num(r["receita"]), "MZN", f"{num(r['kg_vendidos'], 1)} kg vendidos", "nota", "verde"),
+    ] + _cartoes_margem(r))
 
-    st.subheader("Indicadores económicos")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Custo total (MZN)", f"{r['custo_total']:,.0f}".replace(",", "."))
-    c2.metric("Receita (MZN)", f"{r['receita']:,.0f}".replace(",", "."))
-    c3.metric("Margem bruta", f"{r['margem_bruta_pct']}%")
-    c4.metric("Margem líquida", f"{r['margem_liquida_pct']}%")
-
-    st.divider()
-
-    # Semáforos
-    st.subheader("Comparação com Ross 308")
+    ui.secao("Comparação com a referência", ciclo["linhagem"])
     semas = semaforos(cid)
     if semas:
-        for nome, (actual, ref, (cor, desvio)) in semas.items():
-            emoji = {"verde": "🟢", "amarelo": "🟡", "vermelho": "🔴"}.get(cor, "⚪")
-            st.markdown(f"{emoji} **{nome}:** {actual:.1f} (ref. {ref:.1f}, desvio {desvio:+.1f}%)")
+        casas = {"Peso médio (g)": 0, "ICA": 2}
+        cols = st.columns(len(semas))
+        for col, (nome, (actual, ref, (cor, desvio))) in zip(cols, semas.items()):
+            col.markdown(ui.semaforo_html(nome, actual, ref, cor, desvio, casas.get(nome, 1)),
+                         unsafe_allow_html=True)
     else:
-        st.caption("Sem pesagens suficientes para comparar com a referência.")
-
-    # Gráficos
-    st.divider()
-    st.subheader("Evolução do ciclo")
+        ui.vazio("Sem pesagens suficientes para comparar com a referência.")
 
     with conectar() as conn:
-        reg = pd.read_sql_query(
-            "SELECT * FROM registo_diario WHERE ciclo_id = %s ORDER BY dia_ciclo",
-            conn, params=(cid,))
-        pes = pd.read_sql_query(
-            "SELECT * FROM pesagens WHERE ciclo_id = %s ORDER BY dia_ciclo",
-            conn, params=(cid,))
+        reg = ler_df(
+            "SELECT dia_ciclo, mortalidade, consumo_racao_kg FROM registo_diario "
+            "WHERE ciclo_id = %s ORDER BY dia_ciclo", conn, params=(cid,))
+        pes = ler_df(
+            "SELECT dia_ciclo, peso_medio_g FROM pesagens WHERE ciclo_id = %s "
+            "ORDER BY dia_ciclo", conn, params=(cid,))
 
-    g1, g2 = st.columns(2)
+    ui.secao("Evolução do ciclo")
+    g1, g2 = st.columns(2, gap="medium")
     with g1:
-        if not pes.empty:
-            st.markdown("**Peso médio (g)**")
-            st.line_chart(pes.set_index("dia_ciclo")["peso_medio_g"])
+        with st.container(border=True, key="caixa_1"):
+            st.markdown("**Peso médio vs referência**")
+            if pes.empty:
+                st.caption("Sem pesagens registadas.")
+            else:
+                ref = _referencia(ciclo["linhagem"])
+                ref = ref[ref["dia"] <= max(pes["dia_ciclo"].max() + 7, 7)]
+                dados = pd.concat([
+                    pes.rename(columns={"dia_ciclo": "Dia", "peso_medio_g": "Peso"}).assign(Série="Peso real"),
+                    ref.rename(columns={"dia": "Dia", "peso_medio_g": "Peso"}).assign(Série=f"Referência {ciclo['linhagem']}"),
+                ])
+                nome_ref = f"Referência {ciclo['linhagem']}"
+                dominio = ["Peso real", nome_ref]
+                cor = alt.Color("Série:N", title=None,
+                                scale=alt.Scale(domain=dominio, range=[P["g700"], P["ouro"]]),
+                                legend=alt.Legend(orient="top", symbolStrokeWidth=3))
+                eixo_x = alt.X("Dia:Q", title="Dia do ciclo")
+                eixo_y = alt.Y("Peso:Q", title="Peso médio (g)", axis=alt.Axis(format="d"))
+                dica = ["Série", "Dia", alt.Tooltip("Peso:Q", format=".0f", title="Peso (g)")]
+                linha_ref = alt.Chart(dados[dados["Série"] == nome_ref]).mark_line(
+                    strokeWidth=2.5, strokeDash=[6, 4]).encode(x=eixo_x, y=eixo_y, color=cor, tooltip=dica)
+                linha_real = alt.Chart(dados[dados["Série"] == "Peso real"]).mark_line(
+                    strokeWidth=3.5, point=alt.OverlayMarkDef(size=70, filled=True)).encode(
+                    x=eixo_x, y=eixo_y, color=cor, tooltip=dica)
+                graf = (linha_ref + linha_real).properties(height=260)
+                st.altair_chart(ui.tema_grafico(graf), use_container_width=True)
     with g2:
-        if not reg.empty:
+        with st.container(border=True, key="caixa_2"):
             st.markdown("**Mortalidade diária**")
-            st.bar_chart(reg.set_index("dia_ciclo")["mortalidade"])
+            if reg.empty:
+                st.caption("Sem registos diários.")
+            else:
+                limite = max(3, round(ciclo["n_aves_alojadas"] * 0.005))
+                d = reg.rename(columns={"dia_ciclo": "Dia", "mortalidade": "Mortes"})
+                barras = alt.Chart(d).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                    x=alt.X("Dia:O", title="Dia do ciclo", axis=alt.Axis(labelAngle=0, labelOverlap=True)),
+                    y=alt.Y("Mortes:Q", title="Aves mortas", axis=alt.Axis(format="d", tickMinStep=1)),
+                    color=alt.condition(alt.datum.Mortes > limite, alt.value(P["verm"]), alt.value(P["g500"])),
+                    tooltip=["Dia", "Mortes"],
+                )
+                linha = alt.Chart(pd.DataFrame({"y": [limite]})).mark_rule(
+                    color=P["verm"], strokeDash=[5, 4], opacity=.7).encode(y="y:Q")
+                st.altair_chart(ui.tema_grafico((barras + linha).properties(height=260)),
+                                use_container_width=True)
+                st.caption(f"Barras a vermelho: dias acima de {limite} mortes (0,5% do lote).")
+
+    if not reg.empty:
+        with st.container(border=True, key="caixa_3"):
+            st.markdown("**Consumo diário de ração (kg)**")
+            d = reg.rename(columns={"dia_ciclo": "Dia", "consumo_racao_kg": "Ração"})
+            area = alt.Chart(d).mark_area(
+                line={"color": P["terra"], "strokeWidth": 2},
+                color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
+                                   stops=[alt.GradientStop(color="#FFFFFF", offset=0),
+                                          alt.GradientStop(color=P["ouro"], offset=1)]),
+                opacity=.55,
+            ).encode(
+                x=alt.X("Dia:Q", title="Dia do ciclo"),
+                y=alt.Y("Ração:Q", title="kg por dia"),
+                tooltip=["Dia", alt.Tooltip("Ração:Q", format=".1f")],
+            ).properties(height=220)
+            st.altair_chart(ui.tema_grafico(area), use_container_width=True)
 
 
+# ======================================================================
+# Ciclos
+# ======================================================================
 def modulo_novo_ciclo():
-    st.title("🥚 Novo ciclo")
+    ui.cabecalho("Novo ciclo", "Registe o alojamento de um novo lote de pintos.", "Ciclos")
 
     with st.form("novo_ciclo"):
         col1, col2 = st.columns(2)
         with col1:
             codigo = st.text_input("Código do ciclo", value=f"C{datetime.now():%Y%m}")
-            data_inicio = st.date_input("Data de alojamento", value=date.today())
+            data_inicio = st.date_input("Data de alojamento", value=date.today(), format="DD/MM/YYYY")
             n_aves = st.number_input("Nº de aves alojadas", min_value=1, value=1000, step=100)
         with col2:
             linhagem = st.selectbox("Linhagem", ["Ross 308", "Cobb 500", "Hubbard", "Outra"])
             sexo = st.selectbox("Sexo", ["Misto", "Macho", "Fêmea"])
-            observacoes = st.text_area("Observações (opcional)")
+            observacoes = st.text_area("Observações (opcional)", height=120)
 
-        if st.form_submit_button("Criar ciclo", type="primary"):
+        if st.form_submit_button("Criar ciclo", type="primary", icon=":material/add:"):
             with conectar() as conn:
                 cur = conn.cursor()
                 cur.execute("""
@@ -191,32 +380,14 @@ def modulo_novo_ciclo():
                 """, (st.session_state.user["id"], codigo, str(data_inicio),
                       n_aves, linhagem, sexo, observacoes))
                 conn.commit()
-            st.success(f"Ciclo **{codigo}** criado com sucesso.")
-            st.balloons()
-
-
-def _selecionar_ciclo(label: str = "Ciclo", apenas_activos: bool = False) -> int | None:
-    with conectar() as conn:
-        cur = conn.cursor()
-        q = "SELECT id, codigo, data_inicio, estado FROM ciclos"
-        if apenas_activos:
-            q += " WHERE estado = 'activo'"
-        q += " ORDER BY data_inicio DESC"
-        cur.execute(q)
-        ciclos = cur.fetchall()
-    if not ciclos:
-        st.warning("Sem ciclos disponíveis.")
-        return None
-    opcoes = {f"{c['codigo']} — {c['data_inicio']} ({c['estado']})": c["id"] for c in ciclos}
-    escolha = st.selectbox(label, list(opcoes.keys()))
-    return opcoes[escolha]
+            st.success(f"Ciclo **{codigo}** criado com sucesso. Já pode lançar o registo diário.")
 
 
 def modulo_ver_ciclos():
-    st.title("📋 Ver ciclos")
+    ui.cabecalho("Ciclos", "Todos os lotes registados no sistema, activos e encerrados.", "Ciclos")
 
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT c.codigo, c.data_inicio, c.data_fim, c.n_aves_alojadas,
                    c.linhagem, c.sexo, c.estado, u.nome_completo AS responsavel
             FROM ciclos c JOIN utilizadores u ON u.id = c.utilizador_id
@@ -224,44 +395,52 @@ def modulo_ver_ciclos():
         """, conn)
 
     if df.empty:
-        st.info("Nenhum ciclo registado.")
+        ui.vazio("Nenhum ciclo registado.")
         return
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        df, width="stretch", hide_index=True,
+        column_config={
+            "codigo": "Código", "data_inicio": "Início", "data_fim": "Fim",
+            "n_aves_alojadas": st.column_config.NumberColumn("Aves alojadas", format="%d"),
+            "linhagem": "Linhagem", "sexo": "Sexo", "estado": "Estado",
+            "responsavel": "Responsável",
+        },
+    )
 
-    st.divider()
-    st.subheader("Encerrar / reactivar ciclo")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.secao("Encerrar ou reactivar um ciclo")
+    cid = _selecionar_ciclo("Ciclo", chave="ver_ciclo")
     if cid:
         with conectar() as conn:
             cur = conn.cursor()
             cur.execute("SELECT estado FROM ciclos WHERE id = %s", (cid,))
             estado = cur.fetchone()["estado"]
-        col1, col2 = st.columns(2)
         if estado == "activo":
-            with col1:
-                if st.button("Encerrar ciclo", type="primary"):
-                    with conectar() as conn:
-                        conn.cursor().execute("""
-                            UPDATE ciclos SET estado='encerrado', data_fim=%s
-                            WHERE id = %s
-                        """, (str(date.today()), cid))
-                        conn.commit()
-                    st.success("Ciclo encerrado.")
-                    st.rerun()
+            if st.button("Encerrar ciclo", type="primary", icon=":material/lock:"):
+                with conectar() as conn:
+                    conn.cursor().execute(
+                        "UPDATE ciclos SET estado='encerrado', data_fim=%s WHERE id = %s",
+                        (str(date.today()), cid))
+                    conn.commit()
+                st.success("Ciclo encerrado.")
+                st.rerun()
         else:
-            with col1:
-                if st.button("Reactivar ciclo"):
-                    with conectar() as conn:
-                        conn.cursor().execute("UPDATE ciclos SET estado='activo' WHERE id = %s", (cid,))
-                        conn.commit()
-                    st.success("Ciclo reactivado.")
-                    st.rerun()
+            if st.button("Reactivar ciclo", icon=":material/lock_open:"):
+                with conectar() as conn:
+                    conn.cursor().execute("UPDATE ciclos SET estado='activo' WHERE id = %s", (cid,))
+                    conn.commit()
+                st.success("Ciclo reactivado.")
+                st.rerun()
 
 
+# ======================================================================
+# Operação diária
+# ======================================================================
 def modulo_registo_diario():
-    st.title("📝 Registo diário")
-    cid = _selecionar_ciclo("Ciclo", apenas_activos=True)
+    ui.cabecalho("Registo diário",
+                 "Lance os dados do dia. O sistema avalia logo as condições e gera alertas quando é preciso agir.",
+                 "Operação diária")
+    cid = _selecionar_ciclo("Ciclo", apenas_activos=True, chave="reg_ciclo")
     if cid is None:
         return
 
@@ -274,7 +453,7 @@ def modulo_registo_diario():
         st.markdown("**Dados zootécnicos**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            data_reg = st.date_input("Data", value=date.today())
+            data_reg = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
         with col2:
             mort = st.number_input("Mortalidade (aves)", min_value=0, value=0)
         with col3:
@@ -300,7 +479,7 @@ def modulo_registo_diario():
 
         obs = st.text_input("Observações (opcional)")
 
-        if st.form_submit_button("Registar", type="primary"):
+        if st.form_submit_button("Registar o dia", type="primary", icon=":material/save:"):
             dia = (data_reg - inicio).days
             try:
                 with conectar() as conn:
@@ -317,7 +496,6 @@ def modulo_registo_diario():
                               estado_luz, n_beb, n_com, area_m2, obs))
                     conn.commit()
 
-                # Avaliar motor de alertas
                 registo = {
                     "data": str(data_reg), "mortalidade": mort,
                     "consumo_racao_kg": racao, "temp_max": temp_max,
@@ -327,39 +505,45 @@ def modulo_registo_diario():
                 }
                 alertas = avaliar(cid, registo)
                 guardar_alertas(cid, str(data_reg), alertas)
-
-                st.success(f"Registo do dia {dia} guardado.")
-
-                if alertas:
-                    st.warning(f"⚠️ Foram gerados {len(alertas)} alerta(s):")
-                    for a in alertas:
-                        icone = {"critico": "🔴", "aviso": "🟡", "info": "🔵"}.get(a["nivel"], "⚪")
-                        with st.container():
-                            st.markdown(f"**{icone} {a['titulo']}** — {a['mensagem']}")
-                            st.caption(f"**Recomendação:** {a['recomendacao']}")
-                else:
-                    st.info("Sem alertas gerados por este registo. Dia dentro da normalidade.")
+                st.session_state["_ultimo_registo"] = (dia, alertas)
             except Exception as e:
-                st.error(f"Erro: {e}")
+                st.error(f"Não foi possível gravar o registo: {e}")
 
-    # Histórico
-    st.divider()
-    st.subheader("Histórico do ciclo")
+    if "_ultimo_registo" in st.session_state:
+        dia, alertas = st.session_state.pop("_ultimo_registo")
+        st.success(f"Registo do dia {dia} guardado.")
+        if alertas:
+            ui.secao(f"{len(alertas)} alerta(s) gerado(s) por este registo")
+            codigo = next((c["codigo"] for c in _ciclos() if c["id"] == cid), "")
+            for a in alertas:
+                st.markdown(ui.alerta_html({**a, "ciclo_codigo": codigo, "data": "hoje"}),
+                            unsafe_allow_html=True)
+        else:
+            st.info("Sem alertas gerados por este registo. Dia dentro da normalidade.")
+
+    ui.secao("Histórico do ciclo")
     with conectar() as conn:
-        df = pd.read_sql_query("""
-            SELECT data, dia_ciclo, mortalidade, consumo_racao_kg, observacoes
+        df = ler_df("""
+            SELECT data, dia_ciclo, mortalidade, consumo_racao_kg, temp_max,
+                   estado_agua, observacoes
             FROM registo_diario WHERE ciclo_id = %s
             ORDER BY dia_ciclo DESC
         """, conn, params=(cid,))
     if df.empty:
-        st.caption("Sem registos ainda.")
+        ui.vazio("Sem registos ainda neste ciclo.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "data": "Data", "dia_ciclo": "Dia", "mortalidade": "Mortes",
+            "consumo_racao_kg": st.column_config.NumberColumn("Ração (kg)", format="%.1f"),
+            "temp_max": st.column_config.NumberColumn("T. máx (°C)", format="%.1f"),
+            "estado_agua": "Água", "observacoes": "Observações",
+        })
 
 
 def modulo_pesagens():
-    st.title("⚖️ Pesagens")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Pesagens", "Registe a pesagem semanal de uma amostra de aves. O peso médio é calculado automaticamente.",
+                 "Operação diária")
+    cid = _selecionar_ciclo("Ciclo", chave="pes_ciclo")
     if cid is None:
         return
 
@@ -371,13 +555,13 @@ def modulo_pesagens():
     with st.form("pesagem"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            data_pes = st.date_input("Data da pesagem", value=date.today())
+            data_pes = st.date_input("Data da pesagem", value=date.today(), format="DD/MM/YYYY")
         with col2:
             n_amostra = st.number_input("Nº de aves amostradas", min_value=1, value=20)
         with col3:
             peso_total = st.number_input("Peso total da amostra (kg)", min_value=0.0, value=0.0, step=0.1)
 
-        if st.form_submit_button("Registar pesagem", type="primary"):
+        if st.form_submit_button("Registar pesagem", type="primary", icon=":material/scale:"):
             peso_medio_g = (peso_total * 1000) / n_amostra if n_amostra else 0
             dia = (data_pes - inicio).days
             with conectar() as conn:
@@ -387,36 +571,43 @@ def modulo_pesagens():
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (cid, str(data_pes), dia, n_amostra, peso_medio_g, peso_total))
                 conn.commit()
-            st.success(f"Pesagem registada: peso médio = **{peso_medio_g:.1f} g** (dia {dia}).")
+            st.success(f"Pesagem registada: peso médio de **{num(peso_medio_g, 1)} g** no dia {dia}.")
 
-    st.divider()
-    st.subheader("Histórico de pesagens")
+    ui.secao("Histórico de pesagens")
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT data, dia_ciclo, n_aves_amostra, peso_medio_g, peso_total_kg
             FROM pesagens WHERE ciclo_id = %s
             ORDER BY dia_ciclo DESC
         """, conn, params=(cid,))
     if df.empty:
-        st.caption("Sem pesagens ainda.")
+        ui.vazio("Sem pesagens ainda neste ciclo.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "data": "Data", "dia_ciclo": "Dia", "n_aves_amostra": "Aves na amostra",
+            "peso_medio_g": st.column_config.NumberColumn("Peso médio (g)", format="%.0f"),
+            "peso_total_kg": st.column_config.NumberColumn("Peso total (kg)", format="%.2f"),
+        })
+
+
+# ======================================================================
+# Economia
+# ======================================================================
+CATEGORIAS = ["Pintos do dia", "Ração", "Medicamentos e vacinas",
+              "Cama", "Água e electricidade", "Mão-de-obra",
+              "Combustível e transporte", "Manutenção", "Outros"]
 
 
 def modulo_custos():
-    st.title("💰 Custos")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Custos", "Lance cada despesa do ciclo para acompanhar o custo por ave e por quilo.", "Economia")
+    cid = _selecionar_ciclo("Ciclo", chave="custo_ciclo")
     if cid is None:
         return
-
-    CATEGORIAS = ["Pintos do dia", "Ração", "Medicamentos e vacinas",
-                  "Cama", "Água e electricidade", "Mão-de-obra",
-                  "Combustível e transporte", "Manutenção", "Outros"]
 
     with st.form("custo"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            data_c = st.date_input("Data", value=date.today())
+            data_c = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
         with col2:
             cat = st.selectbox("Categoria", CATEGORIAS)
         with col3:
@@ -424,255 +615,271 @@ def modulo_custos():
         valor = st.number_input("Valor (MZN)", min_value=0.0, value=0.0, step=100.0)
         desc = st.text_input("Descrição (opcional)")
 
-        if st.form_submit_button("Registar custo", type="primary"):
+        if st.form_submit_button("Registar custo", type="primary", icon=":material/add_card:"):
             with conectar() as conn:
                 conn.cursor().execute("""
                     INSERT INTO custos (ciclo_id, data, categoria, tipo, descricao, valor_mzn)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (cid, str(data_c), cat, tipo, desc, valor))
                 conn.commit()
-            st.success(f"Custo de **{valor:,.2f} MZN** registado.")
+            st.success(f"Custo de **{mzn(valor, 2)}** registado.")
 
-    st.divider()
-    st.subheader("Resumo de custos")
     c = custos_totais(cid)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total", f"{c['total']:,.2f} MZN")
-    col2.metric("Variáveis", f"{c['variavel']:,.2f} MZN")
-    col3.metric("Fixos", f"{c['fixo']:,.2f} MZN")
+    ui.secao("Resumo de custos")
+    ui.grelha([
+        ui.kpi_html("Total", num(c["total"]), "MZN", "", "carteira", "ouro"),
+        ui.kpi_html("Variáveis", num(c["variavel"]), "MZN", "", "racao", "verde"),
+        ui.kpi_html("Fixos", num(c["fixo"]), "MZN", "", "camada", "neutro"),
+    ])
 
     if c["por_categoria"]:
-        st.markdown("**Por categoria**")
         df_cat = pd.DataFrame(
             [(k, v) for k, v in c["por_categoria"].items()],
-            columns=["Categoria", "Valor (MZN)"]
-        ).sort_values("Valor (MZN)", ascending=False)
-        st.dataframe(df_cat, use_container_width=True, hide_index=True)
+            columns=["Categoria", "Valor"],
+        ).sort_values("Valor", ascending=False)
+        ui.secao("Distribuição por categoria")
+        with st.container(border=True, key="caixa_4"):
+            graf = alt.Chart(df_cat).mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5,
+                                               color=P["ouro"]).encode(
+                x=alt.X("Valor:Q", title="MZN", axis=alt.Axis(format="~s")),
+                y=alt.Y("Categoria:N", sort="-x", title=None),
+                tooltip=["Categoria", alt.Tooltip("Valor:Q", format=".0f", title="MZN")],
+            ).properties(height=max(120, 38 * len(df_cat)))
+            st.altair_chart(ui.tema_grafico(graf), use_container_width=True)
 
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT data, categoria, tipo, descricao, valor_mzn
             FROM custos WHERE ciclo_id = %s
             ORDER BY data DESC, id DESC
         """, conn, params=(cid,))
     if not df.empty:
-        st.markdown("**Histórico**")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        ui.secao("Histórico")
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "data": "Data", "categoria": "Categoria", "tipo": "Tipo", "descricao": "Descrição",
+            "valor_mzn": st.column_config.NumberColumn("Valor (MZN)", format="%.2f"),
+        })
 
 
 def modulo_vendas():
-    st.title("🛒 Vendas")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Vendas", "Registe cada venda de aves para calcular a receita e as margens do ciclo.", "Economia")
+    cid = _selecionar_ciclo("Ciclo", chave="venda_ciclo")
     if cid is None:
         return
 
     with st.form("venda"):
         col1, col2 = st.columns(2)
         with col1:
-            data_v = st.date_input("Data", value=date.today())
+            data_v = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
             n_aves = st.number_input("Nº de aves vendidas", min_value=1, value=100)
             cliente = st.text_input("Cliente (opcional)")
         with col2:
             peso_total = st.number_input("Peso total (kg)", min_value=0.0, value=0.0, step=0.5)
             preco_kg = st.number_input("Preço por kg (MZN)", min_value=0.0, value=380.0, step=5.0)
 
-        if st.form_submit_button("Registar venda", type="primary"):
+        if st.form_submit_button("Registar venda", type="primary", icon=":material/point_of_sale:"):
             with conectar() as conn:
                 conn.cursor().execute("""
                     INSERT INTO vendas (ciclo_id, data, n_aves, peso_total_kg, preco_por_kg, cliente)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (cid, str(data_v), n_aves, peso_total, preco_kg, cliente))
                 conn.commit()
-            st.success(f"Venda de **{peso_total:.1f} kg** por **{peso_total*preco_kg:,.2f} MZN** registada.")
+            st.success(f"Venda de **{num(peso_total, 1)} kg** por **{mzn(peso_total * preco_kg, 2)}** registada.")
 
-    st.divider()
     r = receitas_totais(cid)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Receita total (MZN)", f"{r['receita']:,.2f}")
-    col2.metric("Kg vendidos", f"{r['kg_vendidos']}")
-    col3.metric("Aves vendidas", f"{r['aves_vendidas']:,}".replace(",", "."))
+    ui.secao("Resumo de vendas")
+    ui.grelha([
+        ui.kpi_html("Receita total", num(r["receita"]), "MZN", "", "nota", "verde"),
+        ui.kpi_html("Quilos vendidos", num(r["kg_vendidos"], 1), "kg", "", "peso", "ouro"),
+        ui.kpi_html("Aves vendidas", num(r["aves_vendidas"]), "", "", "ovo", "neutro"),
+    ])
 
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT data, n_aves, peso_total_kg, preco_por_kg,
                    (peso_total_kg * preco_por_kg) AS total_mzn, cliente
             FROM vendas WHERE ciclo_id = %s
             ORDER BY data DESC
         """, conn, params=(cid,))
     if not df.empty:
-        st.markdown("**Histórico de vendas**")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        ui.secao("Histórico de vendas")
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "data": "Data", "n_aves": "Aves",
+            "peso_total_kg": st.column_config.NumberColumn("Peso (kg)", format="%.1f"),
+            "preco_por_kg": st.column_config.NumberColumn("Preço/kg (MZN)", format="%.2f"),
+            "total_mzn": st.column_config.NumberColumn("Total (MZN)", format="%.2f"),
+            "cliente": "Cliente",
+        })
 
 
+# ======================================================================
+# Análise
+# ======================================================================
 def modulo_indicadores():
-    st.title("📈 Indicadores (síntese)")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Indicadores", "Síntese completa dos resultados técnicos e económicos de um ciclo.", "Análise")
+    cid = _selecionar_ciclo("Ciclo", chave="ind_ciclo")
     if cid is None:
         return
 
     r = resumo_ciclo(cid)
+    ciclo = next(c for c in _ciclos() if c["id"] == cid)
+    ui.secao("Técnicos")
+    ui.grelha([
+        ui.kpi_html("Dia do ciclo", str(_dia_ciclo(ciclo, r)), "dias", "", "calendario", "neutro"),
+        ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", "", "ovo", "verde"),
+        ui.kpi_html("Mortalidade", num(r["mortalidade_pct"], 1), "%", "", "pulso", "verm" if r["mortalidade_pct"] > 8 else "verde"),
+        ui.kpi_html("Viabilidade", num(r["viabilidade_pct"], 1), "%", "", "escudo", "verde"),
+        ui.kpi_html("Peso médio", num(r["peso_actual_g"]), "g", "", "peso", "verde"),
+        ui.kpi_html("GMD", num(r["gmd"], 1), "g/dia", "", "subida", "verde"),
+        ui.kpi_html("Consumo de ração", num(r["consumo_racao_kg"]), "kg", "", "racao", "ouro"),
+        ui.kpi_html("ICA", num(r["ica"], 2), "", "", "ciclo", "ouro"),
+        ui.kpi_html("IEP", num(r["iep"]), "", "", "medalha", "ouro"),
+    ])
 
-    st.subheader("Técnicos")
-    df_t = pd.DataFrame({
-        "Indicador": ["Dia do ciclo", "Aves vivas", "Mortalidade",
-                      "Viabilidade", "Peso médio actual", "GMD",
-                      "Consumo ração", "ICA", "IEP"],
-        "Valor": [
-            f"{r['dia_ciclo']} dias",
-            f"{r['aves_vivas']}",
-            f"{r['mortalidade_pct']}%",
-            f"{r['viabilidade_pct']}%",
-            f"{r['peso_actual_g']} g",
-            f"{r['gmd']} g/dia",
-            f"{r['consumo_racao_kg']} kg",
-            f"{r['ica']}",
-            f"{r['iep']}",
-        ]
-    })
-    st.dataframe(df_t, use_container_width=True, hide_index=True)
+    ui.secao("Económicos")
+    pe = r["ponto_equilibrio_kg"]
+    ui.grelha([
+        ui.kpi_html("Custo total", num(r["custo_total"]), "MZN", "", "carteira", "ouro"),
+        ui.kpi_html("Custo variável", num(r["custo_variavel"]), "MZN", "", "racao", "neutro"),
+        ui.kpi_html("Custo fixo", num(r["custo_fixo"]), "MZN", "", "camada", "neutro"),
+        ui.kpi_html("Custo por kg", num(r["custo_por_kg"], 2), "MZN", "", "peso", "ouro"),
+        ui.kpi_html("Custo por ave", num(r["custo_por_ave"], 2), "MZN", "", "ovo", "ouro"),
+        ui.kpi_html("Receita", num(r["receita"]), "MZN", "", "nota", "verde"),
+    ] + _cartoes_margem(r) + [
+        ui.kpi_html("Ponto de equilíbrio", num(pe), "kg", "quilos a vender para cobrir custos", "medalha", "azul"),
+    ])
 
-    st.subheader("Económicos")
-    df_e = pd.DataFrame({
-        "Indicador": ["Custo total", "Custo variável", "Custo fixo",
-                      "Custo por kg", "Custo por ave",
-                      "Receita", "Margem bruta", "Margem líquida",
-                      "Ponto de equilíbrio"],
-        "Valor": [
-            f"{r['custo_total']:,.2f} MZN",
-            f"{r['custo_variavel']:,.2f} MZN",
-            f"{r['custo_fixo']:,.2f} MZN",
-            f"{r['custo_por_kg']:,.2f} MZN",
-            f"{r['custo_por_ave']:,.2f} MZN",
-            f"{r['receita']:,.2f} MZN",
-            f"{r['margem_bruta']:,.2f} MZN ({r['margem_bruta_pct']}%)",
-            f"{r['margem_liquida']:,.2f} MZN ({r['margem_liquida_pct']}%)",
-            f"{r['ponto_equilibrio_kg']} kg",
-        ]
-    })
-    st.dataframe(df_e, use_container_width=True, hide_index=True)
-
-    st.subheader("Comparação com Ross 308")
+    ui.secao("Comparação com a referência")
     semas = semaforos(cid)
     if semas:
-        linhas = []
-        for nome, (actual, ref, (cor, desvio)) in semas.items():
-            label = {"verde": "🟢 OK", "amarelo": "🟡 Atenção", "vermelho": "🔴 Crítico"}.get(cor, "⚪")
-            linhas.append({
-                "Indicador": nome,
-                "Actual": f"{actual:.1f}",
-                "Referência": f"{ref:.1f}",
-                "Desvio": f"{desvio:+.1f}%",
-                "Estado": label,
-            })
-        st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+        casas = {"Peso médio (g)": 0, "ICA": 2}
+        cols = st.columns(len(semas))
+        for col, (nome, (actual, ref, (cor, desvio))) in zip(cols, semas.items()):
+            col.markdown(ui.semaforo_html(nome, actual, ref, cor, desvio, casas.get(nome, 1)),
+                         unsafe_allow_html=True)
+    else:
+        ui.vazio("Sem pesagens suficientes para comparar com a referência.")
 
 
 def modulo_sensibilidade():
-    st.title("📊 Análise de sensibilidade")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Análise de sensibilidade",
+                 "Simule variações do preço de venda e do preço da ração para ver o impacto na margem líquida.",
+                 "Análise")
+    cid = _selecionar_ciclo("Ciclo", chave="sens_ciclo")
     if cid is None:
         return
 
-    st.markdown(
-        "Simule variações do **preço de venda por kg** e do **preço da ração** "
-        "para avaliar o impacto na margem líquida."
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        var_preco = st.slider("Variação do preço de venda (%)", -30, 30, 0, step=5)
-    with col2:
-        var_racao = st.slider("Variação do preço da ração (%)", -30, 50, 0, step=5)
+    base = simular(cid, 0, 0)
+    with st.container(border=True, key="caixa_5"):
+        col1, col2 = st.columns(2, gap="large")
+        with col1:
+            var_preco = st.slider("Variação do preço de venda (%)", -30, 30, 0, step=5)
+        with col2:
+            var_racao = st.slider("Variação do preço da ração (%)", -30, 50, 0, step=5)
 
     s = simular(cid, var_preco, var_racao)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Nova receita (MZN)", f"{s['receita']:,.2f}")
-    c2.metric("Novo custo total (MZN)", f"{s['custo_total']:,.2f}")
-    c3.metric("Nova margem líquida", f"{s['margem_liquida']:,.2f} MZN ({s['margem_liquida_pct']}%)")
+    dif = s["margem_liquida"] - base["margem_liquida"]
+    sinal = "+" if dif >= 0 else ""
+    ui.grelha([
+        ui.kpi_html("Nova receita", num(s["receita"]), "MZN", "", "nota", "verde"),
+        ui.kpi_html("Novo custo total", num(s["custo_total"]), "MZN", "", "carteira", "ouro"),
+        ui.kpi_html("Nova margem líquida", num(s["margem_liquida"]), "MZN",
+                    f"{num(s['margem_liquida_pct'], 1)}% · {sinal}{mzn(dif)} face ao real",
+                    "percent", "verde" if s["margem_liquida"] >= 0 else "verm"),
+    ])
 
-    st.divider()
-    st.subheader("Grelha de cenários")
-    cenarios = tabela_cenarios(cid)
-    df = pd.DataFrame(cenarios)
-    pivot = df.pivot_table(
-        index="var_preco_venda",
-        columns="var_preco_racao",
-        values="margem_liquida",
-    )
-    pivot.index = [f"Venda {int(i):+d}%" for i in pivot.index]
-    pivot.columns = [f"Ração {int(c):+d}%" for c in pivot.columns]
-
-    st.caption("Margem líquida (MZN) para cada combinação de variações.")
-    st.dataframe(
-        pivot.style.format("{:,.0f}").background_gradient(cmap="RdYlGn"),
-        use_container_width=True,
-    )
+    ui.secao("Grelha de cenários", "margem líquida (MZN) para cada combinação")
+    df = pd.DataFrame(tabela_cenarios(cid))
+    df["Venda"] = df["var_preco_venda"].map(lambda v: f"{int(v):+d}%")
+    df["Ração"] = df["var_preco_racao"].map(lambda v: f"{int(v):+d}%")
+    df["Margem"] = df["margem_liquida"]
+    df["Rótulo"] = df["margem_liquida"].map(lambda v: num(v / 1000) + "k")
+    ordem_v = [f"{int(v):+d}%" for v in sorted(df["var_preco_venda"].unique(), reverse=True)]
+    ordem_r = [f"{int(v):+d}%" for v in sorted(df["var_preco_racao"].unique())]
+    limite = max(abs(df["Margem"].min()), abs(df["Margem"].max())) or 1
+    with st.container(border=True, key="caixa_6"):
+        base_c = alt.Chart(df).encode(
+            x=alt.X("Ração:N", sort=ordem_r, title="Variação do preço da ração",
+                    axis=alt.Axis(labelAngle=0, orient="top")),
+            y=alt.Y("Venda:N", sort=ordem_v, title="Variação do preço de venda"),
+        )
+        mapa = base_c.mark_rect(stroke="#FFFFFF", strokeWidth=3).encode(
+            color=alt.Color("Margem:Q", legend=None,
+                            scale=alt.Scale(domain=[-limite, 0, limite],
+                                            range=[P["verm"], "#F7F3E8", P["g700"]])),
+            tooltip=["Venda", "Ração", alt.Tooltip("Margem:Q", format=".0f", title="Margem (MZN)")],
+        )
+        texto = base_c.mark_text(fontSize=11, fontWeight=600).encode(
+            text="Rótulo:N",
+            color=alt.condition(f"abs(datum.Margem) > {limite * 0.55}",
+                                alt.value("#FFFFFF"), alt.value(P["tinta"])),
+        )
+        st.altair_chart(ui.tema_grafico((mapa + texto).properties(height=360)),
+                        use_container_width=True)
+        st.caption("Verde: lucro. Vermelho: prejuízo. Valores em milhares de meticais.")
 
 
 def modulo_relatorios():
-    st.title("📄 Relatórios")
-    cid = _selecionar_ciclo("Ciclo")
+    ui.cabecalho("Relatórios", "Gere um relatório completo do ciclo em PDF, pronto a imprimir ou partilhar.", "Análise")
+    cid = _selecionar_ciclo("Ciclo", chave="rel_ciclo")
     if cid is None:
         return
 
-    st.markdown("Gere um relatório completo do ciclo em formato PDF.")
-    if st.button("Gerar PDF", type="primary"):
+    if st.button("Gerar relatório em PDF", type="primary", icon=":material/picture_as_pdf:"):
         try:
             caminho = gerar_relatorio_ciclo(cid)
             with open(caminho, "rb") as f:
                 st.download_button(
-                    "⬇️ Transferir PDF",
-                    data=f.read(),
-                    file_name=os.path.basename(caminho),
-                    mime="application/pdf",
-                    use_container_width=True,
+                    "Transferir PDF", data=f.read(),
+                    file_name=os.path.basename(caminho), mime="application/pdf",
+                    icon=":material/download:",
                 )
             st.success(f"Relatório gerado: {os.path.basename(caminho)}")
         except Exception as e:
             st.error(f"Erro ao gerar relatório: {e}")
 
 
+# ======================================================================
+# Alertas
+# ======================================================================
 def modulo_alertas():
-    st.title("⚠️ Alertas e apoio à decisão diária")
+    ui.cabecalho("Alertas e apoio à decisão",
+                 "Situações que pedem intervenção, com a acção recomendada. Registe o que foi feito para fechar cada alerta.",
+                 "Principal")
 
     opcoes = {"Todos os ciclos activos": None}
-    with conectar() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, codigo FROM ciclos WHERE estado='activo' ORDER BY data_inicio DESC")
-            for row in cur.fetchall():
-                opcoes[f"Apenas ciclo {row['codigo']}"] = row["id"]
-    escolha = st.selectbox("Filtro", list(opcoes.keys()))
-    cid_filtro = opcoes[escolha]
+    for c in _ciclos(apenas_activos=True):
+        opcoes[f"Apenas o ciclo {c['codigo']}"] = c["id"]
+    cid_filtro = opcoes[st.selectbox("Filtro", list(opcoes.keys()))]
 
     alertas = listar_alertas_abertos(cid_filtro)
-
-    if not alertas:
-        st.success("✅ Sem alertas abertos no momento.")
-        return
-
     criticos = [a for a in alertas if a["nivel"] == "critico"]
     avisos = [a for a in alertas if a["nivel"] == "aviso"]
     infos = [a for a in alertas if a["nivel"] == "info"]
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("🔴 Críticos", len(criticos))
-    c2.metric("🟡 Avisos", len(avisos))
-    c3.metric("🔵 Informativos", len(infos))
+    ui.grelha([
+        ui.kpi_html("Críticos", str(len(criticos)), "", "intervenção imediata", "aviso", "verm"),
+        ui.kpi_html("Avisos", str(len(avisos)), "", "vigiar de perto", "aviso", "amar"),
+        ui.kpi_html("Informativos", str(len(infos)), "", "para conhecimento", "info", "azul"),
+    ])
 
-    st.divider()
-
+    ui.secao("Alertas abertos")
+    if not alertas:
+        st.markdown(
+            f'<div class="gv-vazio">{icone("ok", 28, P["g700"])}<br><b>Sem alertas abertos.</b> '
+            "Todos os ciclos estão dentro da normalidade.</div>",
+            unsafe_allow_html=True,
+        )
     for a in alertas:
-        icone = {"critico": "🔴", "aviso": "🟡", "info": "🔵"}.get(a["nivel"], "⚪")
-        with st.expander(f"{icone} [{a['ciclo_codigo']} · {a['data']}] {a['titulo']}", expanded=(a["nivel"] == "critico")):
-            st.markdown(f"**{a['mensagem']}**")
-            st.markdown(f"💡 **Recomendação:** {a['recomendacao']}")
+        st.markdown(ui.alerta_html(a), unsafe_allow_html=True)
+        with st.expander("Registar acção tomada e fechar o alerta"):
             with st.form(f"resolver_{a['id']}"):
                 accao = st.text_area(
                     "Acção correctiva tomada",
-                    placeholder="Descreva o que foi feito para resolver o alerta...",
+                    placeholder="Descreva o que foi feito para resolver a situação...",
                     height=80,
                 )
-                if st.form_submit_button("Marcar como resolvido", type="primary"):
+                if st.form_submit_button("Marcar como resolvido", type="primary", icon=":material/task_alt:"):
                     if accao.strip():
                         resolver_alerta(a["id"], accao)
                         st.success("Alerta marcado como resolvido.")
@@ -680,11 +887,9 @@ def modulo_alertas():
                     else:
                         st.warning("Descreva a acção tomada antes de marcar como resolvido.")
 
-    # Histórico de alertas resolvidos
-    st.divider()
-    st.subheader("Histórico de alertas resolvidos")
+    ui.secao("Histórico de alertas resolvidos")
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT c.codigo AS ciclo, a.data, a.nivel, a.titulo,
                    a.accao_tomada, a.resolvido_em
             FROM alertas a JOIN ciclos c ON c.id = a.ciclo_id
@@ -692,26 +897,34 @@ def modulo_alertas():
             ORDER BY a.resolvido_em DESC LIMIT 50
         """, conn)
     if df.empty:
-        st.caption("Sem alertas resolvidos registados.")
+        st.caption("Ainda não há alertas resolvidos.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "ciclo": "Ciclo", "data": "Data", "nivel": "Nível", "titulo": "Alerta",
+            "accao_tomada": "Acção tomada",
+            "resolvido_em": st.column_config.DatetimeColumn("Resolvido em", format="DD/MM/YYYY HH:mm"),
+        })
 
 
+# ======================================================================
+# Administração
+# ======================================================================
 def modulo_utilizadores():
-    st.title("👥 Utilizadores")
+    ui.cabecalho("Utilizadores", "Contas com acesso ao sistema e respectivos papéis.", "Administração")
     if st.session_state.user["papel"] != "administrador":
         st.warning("Apenas administradores podem gerir utilizadores.")
         return
 
     with conectar() as conn:
-        df = pd.read_sql_query("""
+        df = ler_df("""
             SELECT username, nome_completo, papel, criado_em
             FROM utilizadores ORDER BY criado_em DESC
         """, conn)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True, column_config={
+        "username": "Utilizador", "nome_completo": "Nome", "papel": "Papel", "criado_em": "Criado em",
+    })
 
-    st.divider()
-    st.subheader("Registar novo utilizador")
+    ui.secao("Registar novo utilizador")
     with st.form("novo_user"):
         col1, col2 = st.columns(2)
         with col1:
@@ -720,62 +933,107 @@ def modulo_utilizadores():
         with col2:
             p = st.text_input("Palavra-passe", type="password")
             papel = st.selectbox("Papel", ["operador", "administrador"])
-        if st.form_submit_button("Criar"):
+        if st.form_submit_button("Criar utilizador", type="primary", icon=":material/person_add:"):
             if registar_utilizador(u, n, p, papel):
                 st.success("Utilizador criado.")
                 st.rerun()
             else:
-                st.error("Esse username já existe.")
+                st.error("Esse utilizador já existe.")
 
 
 # ======================================================================
-# Encaminhador
+# Navegação
 # ======================================================================
+MODULOS = {
+    "inicio": modulo_inicio,
+    "dashboard": modulo_dashboard,
+    "alertas": modulo_alertas,
+    "registo": modulo_registo_diario,
+    "pesagens": modulo_pesagens,
+    "novo": modulo_novo_ciclo,
+    "ciclos": modulo_ver_ciclos,
+    "importar": pagina_importar,
+    "custos": modulo_custos,
+    "vendas": modulo_vendas,
+    "indicadores": modulo_indicadores,
+    "sensibilidade": modulo_sensibilidade,
+    "relatorios": modulo_relatorios,
+    "utilizadores": modulo_utilizadores,
+}
+
+
+def _menu_lateral(user: dict):
+    try:
+        n_alertas = len(listar_alertas_abertos())
+    except Exception:
+        n_alertas = 0
+
+    grupos = [
+        ("Principal", [
+            ("inicio", "Início", ":material/home:"),
+            ("dashboard", "Painel do ciclo", ":material/space_dashboard:"),
+            ("alertas", f"Alertas ({n_alertas})" if n_alertas else "Alertas", ":material/notifications:"),
+        ]),
+        ("Operação diária", [
+            ("registo", "Registo diário", ":material/edit_note:"),
+            ("pesagens", "Pesagens", ":material/scale:"),
+        ]),
+        ("Ciclos", [
+            ("novo", "Novo ciclo", ":material/add_circle:"),
+            ("ciclos", "Ver ciclos", ":material/list_alt:"),
+            ("importar", "Importar histórico", ":material/upload_file:"),
+        ]),
+        ("Economia", [
+            ("custos", "Custos", ":material/payments:"),
+            ("vendas", "Vendas", ":material/point_of_sale:"),
+        ]),
+        ("Análise", [
+            ("indicadores", "Indicadores", ":material/insights:"),
+            ("sensibilidade", "Sensibilidade", ":material/tune:"),
+            ("relatorios", "Relatórios PDF", ":material/picture_as_pdf:"),
+        ]),
+        ("Administração", [
+            ("utilizadores", "Utilizadores", ":material/group:"),
+        ]),
+    ]
+
+    with st.sidebar:
+        st.markdown(
+            f'<div class="gv-marca">{ui.logo_svg(42)}<div><b>GESTAV</b>'
+            "<small>Granja FAVET-UEM</small></div></div>",
+            unsafe_allow_html=True,
+        )
+        actual = st.session_state.pagina
+        for titulo, itens in grupos:
+            st.markdown(f'<div class="gv-grupo">{titulo}</div>', unsafe_allow_html=True)
+            for chave, rotulo, ico in itens:
+                st.button(
+                    rotulo, icon=ico, key=f"nav_{chave}", width="stretch",
+                    type="primary" if chave == actual else "tertiary",
+                    on_click=_ir_para, args=(chave,),
+                )
+
+        st.divider()
+        st.markdown(
+            f'<div class="gv-utilizador"><span class="av">{ui.iniciais(user["nome_completo"])}</span>'
+            f'<div><b>{user["nome_completo"]}</b><small>@{user["username"]} · {user["papel"]}</small></div></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Terminar sessão", icon=":material/logout:", width="stretch", type="tertiary"):
+            st.session_state.clear()
+            st.rerun()
+
+
 def main():
     if "user" not in st.session_state:
         tela_login()
         return
 
-    user = st.session_state.user
+    if st.session_state.get("pagina") not in MODULOS:
+        st.session_state.pagina = "inicio"
 
-    with st.sidebar:
-        st.markdown(f"### 👤 {user['nome_completo']}")
-        st.caption(f"@{user['username']} ({user['papel']})")
-        st.divider()
-
-        # Contar alertas abertos para badge
-        try:
-            n_alertas = len(listar_alertas_abertos())
-        except Exception:
-            n_alertas = 0
-        label_alertas = f"⚠️ Alertas ({n_alertas})" if n_alertas else "⚠️ Alertas"
-
-        modulos = {
-            "📊 Dashboard": modulo_dashboard,
-            label_alertas: modulo_alertas,
-            "🥚 Novo ciclo": modulo_novo_ciclo,
-            "📥 Importar ciclo histórico": pagina_importar,
-            "📋 Ver ciclos": modulo_ver_ciclos,
-            "📝 Registo diário": modulo_registo_diario,
-            "⚖️ Pesagens": modulo_pesagens,
-            "💰 Custos": modulo_custos,
-            "🛒 Vendas": modulo_vendas,
-            "📈 Indicadores": modulo_indicadores,
-            "📊 Análise de sensibilidade": modulo_sensibilidade,
-            "📄 Relatórios (PDF)": modulo_relatorios,
-            "👥 Utilizadores": modulo_utilizadores,
-        }
-
-        escolha = st.radio("Menu", list(modulos.keys()), label_visibility="collapsed")
-
-        st.divider()
-        if st.button("Terminar sessão", use_container_width=True):
-            del st.session_state.user
-            st.rerun()
-
-        st.caption("GESTAV v1.0 — FAVET/UEM")
-
-    modulos[escolha]()
+    _menu_lateral(st.session_state.user)
+    MODULOS[st.session_state.pagina]()
 
 
 if __name__ == "__main__":
