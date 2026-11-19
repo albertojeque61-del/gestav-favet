@@ -1,0 +1,17 @@
+{
+  "name": "GESTAV - Gestão da Granja FAVET-UEM",
+  "short_name": "GESTAV",
+  "description": "Gestão técnico-económica da produção de frangos de corte na granja da FAVET-UEM",
+  "lang": "pt",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#143620",
+  "theme_color": "#143620",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
