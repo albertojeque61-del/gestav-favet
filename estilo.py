@@ -7,6 +7,7 @@ cores do sistema basta alterar o bloco PALETA abaixo.
 """
 
 import html
+import itertools
 from datetime import datetime
 
 import streamlit as st
@@ -47,19 +48,48 @@ TONS = {
 
 
 # ----------------------------------------------------------------------
-# Logótipo: ovo dourado com uma linha de crescimento (avicultura + gestão)
+# Logótipo: frango com volume, luz e sombra (avicultura)
 # ----------------------------------------------------------------------
+_N_LOGO = itertools.count()
+
+
+def _frango_svg(tamanho=44, fundo=False, k="gv", escala=1.0, raio=56):
+    d = f'''<defs>
+<radialGradient id="{k}bg" cx="35%" cy="28%" r="85%"><stop offset="0" stop-color="#2E7043"/><stop offset=".55" stop-color="#173D24"/><stop offset="1" stop-color="#0B2113"/></radialGradient>
+<filter id="{k}sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#000" flood-opacity=".38"/></filter>
+<filter id="{k}shp" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000" flood-opacity=".35"/></filter>
+<filter id="{k}b4" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="4"/></filter>
+<filter id="{k}b8" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="8"/></filter>
+<radialGradient id="{k}corpo" cx="55%" cy="35%" r="75%"><stop offset="0" stop-color="#F1C87E"/><stop offset=".45" stop-color="#D0943F"/><stop offset=".85" stop-color="#9A6226"/><stop offset="1" stop-color="#734515"/></radialGradient>
+<linearGradient id="{k}asa" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#C4843A"/><stop offset="1" stop-color="#7A4A18"/></linearGradient>
+<linearGradient id="{k}cauda" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5A3410"/><stop offset="1" stop-color="#A86C2A"/></linearGradient>
+<linearGradient id="{k}crista" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F0604C"/><stop offset="1" stop-color="#A3261C"/></linearGradient>
+<linearGradient id="{k}bico" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F7D163"/><stop offset="1" stop-color="#C98E22"/></linearGradient>
+<linearGradient id="{k}perna" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#E9B23F"/><stop offset="1" stop-color="#B07A1C"/></linearGradient>
+</defs>'''
+    f = (f'<rect width="256" height="256" rx="{raio}" fill="url(#{k}bg)"/>' if fundo else "")
+    c = f'''<ellipse cx="128" cy="226" rx="74" ry="9" fill="#000" opacity=".35" filter="url(#{k}b4)"/>
+<path d="M78 150 C52 120 48 82 60 58 C70 88 86 108 104 120 Z" fill="url(#{k}cauda)"/>
+<path d="M74 142 C60 116 66 86 82 70 C84 96 96 112 110 122 Z" fill="#8A561E"/>
+<g stroke="url(#{k}perna)" stroke-width="8" stroke-linecap="round" fill="none"><path d="M112 196 L110 222"/><path d="M146 196 L148 222"/><path d="M110 222 L96 226 M110 222 L114 227 M110 222 L124 225"/><path d="M148 222 L134 225 M148 222 L150 227 M148 222 L162 226"/></g>
+<path d="M150 50 C146 34 158 26 164 38 C166 22 180 22 181 36 C188 26 200 32 194 50 Z" fill="url(#{k}crista)" filter="url(#{k}shp)"/>
+<path d="M62 150 C62 112 94 92 132 96 C144 72 142 54 154 44 C168 34 188 40 192 56 C196 68 192 82 184 94 C208 110 216 136 208 160 C198 192 164 208 126 206 C88 204 62 184 62 150 Z" fill="url(#{k}corpo)" filter="url(#{k}sh)"/>
+<ellipse cx="176" cy="126" rx="16" ry="26" fill="#FFF3D6" opacity=".35" filter="url(#{k}b8)"/>
+<path d="M90 142 C108 118 152 116 174 138 C164 170 130 186 100 178 C88 168 86 154 90 142 Z" fill="url(#{k}asa)" filter="url(#{k}shp)"/>
+<g fill="none" stroke="#5E3812" stroke-opacity=".55" stroke-width="3" stroke-linecap="round"><path d="M100 150 C118 140 146 140 164 146"/><path d="M98 160 C118 152 142 154 158 160"/><path d="M102 170 C118 166 136 168 148 172"/></g>
+<path d="M189 58 L210 66 L189 74 Z" fill="url(#{k}bico)"/><path d="M189 66 L209 66" stroke="#9C6A18" stroke-width="1.5"/>
+<path d="M184 76 C180 92 194 98 197 84 C198 79 194 76 190 76 Z" fill="url(#{k}crista)"/>
+<circle cx="171" cy="60" r="7" fill="#2A1A08"/><circle cx="173.5" cy="57.5" r="2.4" fill="#fff"/>'''
+    off = 128 - 128 * escala
+    corpo = f'<g transform="translate({off} {off}) scale({escala})">{c}</g>' if escala != 1.0 else c
+    s = f'<svg width="{tamanho}" height="{tamanho}" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" aria-label="GESTAV">{d}{f}{corpo}</svg>'
+    return "".join(l.strip() for l in s.splitlines())
+
+
 def logo_svg(tamanho: int = 44, fundo: str | None = None) -> str:
-    fundo_rect = (
-        f'<rect width="64" height="64" rx="16" fill="{fundo}"/>' if fundo else ""
-    )
-    return f"""<svg width="{tamanho}" height="{tamanho}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="GESTAV">
-{fundo_rect}
-<path d="M32 7C44 7 52 25 52 37.5C52 49 43.5 57 32 57C20.5 57 12 49 12 37.5C12 25 20 7 32 7Z" fill="{P['ouro']}"/>
-<path d="M32 7C44 7 52 25 52 37.5C52 49 43.5 57 32 57" fill="none" stroke="#E8B962" stroke-width="2" opacity=".7"/>
-<polyline points="19,43 27,35.5 33,39.5 44,27.5" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="37.5,27 44.5,27 44.5,34" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>"""
+    """Devolve o logótipo em SVG. Cada chamada usa ids próprios para os
+    gradientes, para o logótipo poder aparecer várias vezes na mesma página."""
+    return _frango_svg(tamanho, fundo=bool(fundo), k=f"gv{next(_N_LOGO)}_")
 
 
 # ----------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // Guarda a "casca" do aplicativo (ecrã de abertura e ícones) no telemóvel.
 // Os dados da granja vêm sempre do servidor, por isso não ficam guardados aqui.
-const CACHE = "gestav-casca-v1";
+const CACHE = "gestav-casca-v2";
 const FICHEIROS = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png",
                    "icon-maskable-512.png", "apple-touch-icon.png", "favicon-32.png"];
 
