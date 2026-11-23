@@ -66,6 +66,37 @@ def validar_credenciais(username: str, password: str) -> dict | None:
     return None
 
 
+SENHA_PADRAO = "admin123"
+
+
+def definir_palavra_passe(username: str, nova: str):
+    """Grava uma nova palavra-passe (novo salt) para o utilizador."""
+    salt = secrets.token_hex(16)
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE utilizadores SET password_hash = %s, salt = %s
+                WHERE username = %s
+            """, (_hash_pw(nova, salt), salt, username))
+        conn.commit()
+
+
+def mudar_palavra_passe(username: str, actual: str, nova: str) -> tuple[bool, str]:
+    if validar_credenciais(username, actual) is None:
+        return False, "A palavra-passe actual não está correcta."
+    if len(nova) < 6:
+        return False, "A nova palavra-passe deve ter pelo menos 6 caracteres."
+    if nova == actual:
+        return False, "A nova palavra-passe tem de ser diferente da actual."
+    definir_palavra_passe(username, nova)
+    return True, "Palavra-passe alterada."
+
+
+def admin_com_senha_padrao() -> bool:
+    """Verdadeiro se a conta admin ainda usa a palavra-passe de origem."""
+    return validar_credenciais("admin", SENHA_PADRAO) is not None
+
+
 def criar_admin_padrao():
     with conectar() as conn:
         with conn.cursor() as cur:

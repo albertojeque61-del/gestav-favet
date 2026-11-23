@@ -441,6 +441,16 @@ def data_extenso(d=None) -> str:
     return f"{DIAS[d.weekday()]}, {d.day} de {MESES[d.month - 1]} de {d.year}"
 
 
+def data_curta(iso) -> str:
+    """'2026-11-23' -> '23/11/2026' (devolve o texto original se não for data)."""
+    if not iso:
+        return ""
+    try:
+        return datetime.strptime(str(iso)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return str(iso)
+
+
 def iniciais(nome: str) -> str:
     partes = [p for p in nome.split() if p]
     if not partes:

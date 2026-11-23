@@ -12,15 +12,25 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from database import conectar, inicializar_bd, ler_df
-from auth import validar_credenciais, criar_admin_padrao, registar_utilizador
-from calculos import resumo_ciclo, semaforos, custos_totais, receitas_totais
+from database import (
+    conectar, inicializar_bd, ler_df, listar_linhagens, uniformidade_minima,
+)
+from auth import (
+    validar_credenciais, criar_admin_padrao, registar_utilizador,
+    mudar_palavra_passe, definir_palavra_passe, admin_com_senha_padrao, SENHA_PADRAO,
+)
+from calculos import (
+    resumo_ciclo, semaforos, custos_totais, receitas_totais,
+    ler_pesos, calcular_uniformidade, progresso_fim, descrever_fim,
+)
 from sensibilidade import tabela_cenarios, simular
 from relatorios import gerar_relatorio_ciclo
 from motor_alertas import (
-    avaliar, guardar_alertas, listar_alertas_abertos, resolver_alerta,
+    avaliar, avaliar_abate, guardar_alertas, listar_alertas_abertos, resolver_alerta,
 )
 from importar import pagina_importar
+from semanal import pagina_registo_semanal
+from linhagens import pagina_linhagens
 import estilo as ui
 from estilo import P, num, mzn, icone
 
@@ -69,7 +79,7 @@ def _selecionar_ciclo(label: str = "Ciclo", apenas_activos: bool = False,
         ui.vazio("Ainda não há ciclos disponíveis. Crie um ciclo novo ou importe um ciclo histórico.")
         return None
     opcoes = {
-        f"{c['codigo']}  ·  início {c['data_inicio']}  ·  {c['estado']}": c["id"]
+        f"{c['codigo']}  ·  início {ui.data_curta(c['data_inicio'])}  ·  {c['estado']}": c["id"]
         for c in ciclos
     }
     escolha = st.selectbox(label, list(opcoes.keys()), key=chave)
@@ -107,6 +117,66 @@ def _cartoes_margem(r: dict) -> list[str]:
     ]
 
 
+def _cartao_roi(r: dict) -> str:
+    if r.get("roi_pct") is None:
+        return ui.kpi_html("Retorno do investimento", "–", "", "ainda sem vendas registadas", "subida", "neutro")
+    tom = "verde" if r["roi_pct"] >= 0 else "verm"
+    return ui.kpi_html("Retorno do investimento", num(r["roi_pct"], 1), "%",
+                       "lucro por cada 100 MZN gastos", "subida", tom)
+
+
+def _cartao_fim(ciclo: dict, r: dict, dia: int) -> str:
+    p = progresso_fim(ciclo, dia, r["peso_actual_g"])
+    if p["valor"] is None:
+        return ui.kpi_html("Fim do ciclo", "–", "", p["nota"], "calendario", "neutro")
+    if ciclo.get("estado") != "activo":
+        return ui.kpi_html("Fim do ciclo", "encerrado", "", f"critério: {descrever_fim(ciclo)}", "calendario", "neutro")
+    if p["atingido"]:
+        return ui.kpi_html("Fim do ciclo", "atingido", "", p["nota"], "ok", "azul")
+    casas = 0
+    return ui.kpi_html("Fim do ciclo", f"faltam {num(p['valor'], casas)}", p["unidade"], p["nota"],
+                       "calendario", "neutro")
+
+
+def _cartao_uniformidade(r: dict) -> str | None:
+    if r.get("uniformidade_pct") is None:
+        return None
+    minimo = uniformidade_minima()
+    tom = "verde" if r["uniformidade_pct"] >= minimo else "amar"
+    nota = f"mínimo {num(minimo)}%"
+    if r.get("cv_pct") is not None:
+        nota += f" · CV {num(r['cv_pct'], 1)}%"
+    return ui.kpi_html("Uniformidade", num(r["uniformidade_pct"], 0), "%", nota, "camada", tom)
+
+
+def _controlo_fim(prefixo: str, ciclo: dict | None = None) -> tuple[str, int, float | None]:
+    """Campos para escolher como termina o ciclo. Devolve (tipo, idade, peso_g)."""
+    tipo_actual = (ciclo or {}).get("fim_tipo", "idade")
+    idade_actual = int((ciclo or {}).get("fim_idade") or 42)
+    peso_actual = float((ciclo or {}).get("fim_peso_g") or 1700)
+    opcoes = ["Por idade (dias)", "Por peso-alvo (g)"]
+    escolha = st.radio("Como termina o ciclo", opcoes, horizontal=True,
+                       index=1 if tipo_actual == "peso" else 0, key=f"{prefixo}_fim_tipo")
+    if escolha == opcoes[0]:
+        idades = ["35 dias", "42 dias", "Outra idade"]
+        pre = {35: 0, 42: 1}.get(idade_actual, 2)
+        c1, c2 = st.columns(2)
+        sel = c1.selectbox("Idade de abate", idades, index=pre, key=f"{prefixo}_fim_idade")
+        if sel == "Outra idade":
+            idade = c2.number_input("Idade (dias)", min_value=21, max_value=70, step=1,
+                                    value=idade_actual if pre == 2 else 30, key=f"{prefixo}_fim_outra")
+        else:
+            idade = int(sel.split()[0])
+        return "idade", int(idade), None
+    peso = st.number_input("Peso-alvo de abate (g)", min_value=800.0, max_value=4500.0, step=50.0,
+                           value=peso_actual, key=f"{prefixo}_fim_peso",
+                           help="O ciclo dá-se por terminado quando o peso médio da pesagem atingir este valor.")
+    return "peso", idade_actual, float(peso)
+
+
+DESTINOS = ["Comunidade FAVET", "Comunidade vizinha", "UEM", "Outro"]
+
+
 def _ir_para(pagina: str):
     st.session_state.pagina = pagina
 
@@ -119,7 +189,7 @@ def tela_login():
     with esq:
         itens = [
             ("pulso", "Registo diário com alertas automáticos"),
-            ("subida", "Indicadores técnicos comparados com Ross 308"),
+            ("subida", "Indicadores técnicos comparados com a linhagem"),
             ("carteira", "Custos, receitas e margens por ciclo"),
             ("camada", "Análise de ciclos passados e cenários"),
         ]
@@ -151,15 +221,18 @@ def tela_login():
                 if dados:
                     st.session_state.user = dados
                     st.session_state.pagina = "inicio"
+                    st.session_state.aviso_pw = (p == SENHA_PADRAO)
                     st.rerun()
                 else:
                     st.error("Utilizador ou palavra-passe incorrectos.")
-        st.markdown(
-            '<div class="gv-dica-acesso"><b>Primeiro acesso:</b> utilizador '
-            "<code>admin</code> e palavra-passe <code>admin123</code>. "
-            "Mude a palavra-passe depois de entrar.</div>",
-            unsafe_allow_html=True,
-        )
+        # A dica só aparece enquanto a conta admin mantiver a palavra-passe de origem
+        if admin_com_senha_padrao():
+            st.markdown(
+                '<div class="gv-dica-acesso"><b>Primeiro acesso:</b> utilizador '
+                "<code>admin</code> e palavra-passe <code>admin123</code>. "
+                "Mude a palavra-passe depois de entrar.</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # ======================================================================
@@ -249,8 +322,13 @@ def modulo_dashboard():
 
     ui.secao("Indicadores técnicos")
     tom_mort = "verde" if r["mortalidade_pct"] <= 5 else ("amar" if r["mortalidade_pct"] <= 8 else "verm")
-    ui.grelha([
-        ui.kpi_html("Dia do ciclo", str(_dia_ciclo(ciclo, r)), "dias", f"início em {ciclo['data_inicio']}", "calendario", "neutro"),
+    dia = _dia_ciclo(ciclo, r)
+    extra = [_cartao_fim(ciclo, r, dia)]
+    unif = _cartao_uniformidade(r)
+    if unif:
+        extra.append(unif)
+    ui.grelha(extra + [
+        ui.kpi_html("Dia do ciclo", str(dia), "dias", f"início em {ui.data_curta(ciclo['data_inicio'])}", "calendario", "neutro"),
         ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", f"de {num(ciclo['n_aves_alojadas'])} alojadas", "ovo", "verde"),
         ui.kpi_html("Peso médio", num(r["peso_actual_g"]), "g", "última pesagem", "peso", "verde"),
         ui.kpi_html("Ganho médio diário", num(r["gmd"], 1), "g/dia", "", "subida", "verde"),
@@ -264,7 +342,7 @@ def modulo_dashboard():
     ui.grelha([
         ui.kpi_html("Custo total", num(r["custo_total"]), "MZN", f"{mzn(r['custo_por_ave'], 2)} por ave", "carteira", "ouro"),
         ui.kpi_html("Receita", num(r["receita"]), "MZN", f"{num(r['kg_vendidos'], 1)} kg vendidos", "nota", "verde"),
-    ] + _cartoes_margem(r))
+    ] + _cartoes_margem(r) + [_cartao_roi(r)])
 
     ui.secao("Comparação com a referência", ciclo["linhagem"])
     semas = semaforos(cid)
@@ -358,29 +436,46 @@ def modulo_dashboard():
 def modulo_novo_ciclo():
     ui.cabecalho("Novo ciclo", "Registe o alojamento de um novo lote de pintos.", "Ciclos")
 
-    with st.form("novo_ciclo"):
+    with st.container(border=True, key="caixa_novo"):
         col1, col2 = st.columns(2)
         with col1:
             codigo = st.text_input("Código do ciclo", value=f"C{datetime.now():%Y%m}")
             data_inicio = st.date_input("Data de alojamento", value=date.today(), format="DD/MM/YYYY")
             n_aves = st.number_input("Nº de aves alojadas", min_value=1, value=1000, step=100)
         with col2:
-            linhagem = st.selectbox("Linhagem", ["Ross 308", "Cobb 500", "Hubbard", "Outra"])
+            sem_ref = "Outra (sem referência)"
+            linhagens = listar_linhagens()
+            pre = linhagens.index("Cobb 500") if "Cobb 500" in linhagens else 0
+            linhagem = st.selectbox("Linhagem", linhagens + [sem_ref], index=pre,
+                                    help="A lista mostra as linhagens com valores de referência. "
+                                         "Pode acrescentar outras em Linhagens de referência.")
+            if linhagem == sem_ref:
+                linhagem = st.text_input("Nome da linhagem", placeholder="ex.: Hubbard").strip()
+                st.caption("Sem valores de referência, o ciclo não terá a comparação com a linhagem.")
             sexo = st.selectbox("Sexo", ["Misto", "Macho", "Fêmea"])
-            observacoes = st.text_area("Observações (opcional)", height=120)
 
-        if st.form_submit_button("Criar ciclo", type="primary", icon=":material/add:"):
-            with conectar() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO ciclos
-                        (utilizador_id, codigo, data_inicio, n_aves_alojadas,
-                         linhagem, sexo, observacoes, estado)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'activo')
-                """, (st.session_state.user["id"], codigo, str(data_inicio),
-                      n_aves, linhagem, sexo, observacoes))
-                conn.commit()
-            st.success(f"Ciclo **{codigo}** criado com sucesso. Já pode lançar o registo diário.")
+        ui.secao("Fim do ciclo")
+        fim_tipo, fim_idade, fim_peso = _controlo_fim("novo")
+        observacoes = st.text_area("Observações (opcional)", height=90)
+
+        if st.button("Criar ciclo", type="primary", icon=":material/add:"):
+            if not codigo.strip() or not linhagem:
+                st.error("Preencha o código do ciclo e a linhagem.")
+            else:
+                with conectar() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT INTO ciclos
+                            (utilizador_id, codigo, data_inicio, n_aves_alojadas,
+                             linhagem, sexo, observacoes, estado,
+                             fim_tipo, fim_idade, fim_peso_g)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'activo', %s, %s, %s)
+                    """, (st.session_state.user["id"], codigo.strip(), str(data_inicio),
+                          n_aves, linhagem, sexo, observacoes, fim_tipo, fim_idade, fim_peso))
+                    conn.commit()
+                fim_txt = descrever_fim({"fim_tipo": fim_tipo, "fim_idade": fim_idade, "fim_peso_g": fim_peso})
+                st.success(f"Ciclo **{codigo}** criado, com fim previsto por {fim_txt}. "
+                           "Já pode lançar o registo diário.")
 
 
 def modulo_ver_ciclos():
@@ -389,7 +484,8 @@ def modulo_ver_ciclos():
     with conectar() as conn:
         df = ler_df("""
             SELECT c.codigo, c.data_inicio, c.data_fim, c.n_aves_alojadas,
-                   c.linhagem, c.sexo, c.estado, u.nome_completo AS responsavel
+                   c.linhagem, c.sexo, c.estado, c.fim_tipo, c.fim_idade, c.fim_peso_g,
+                   u.nome_completo AS responsavel
             FROM ciclos c JOIN utilizadores u ON u.id = c.utilizador_id
             ORDER BY c.data_inicio DESC
         """, conn)
@@ -398,12 +494,18 @@ def modulo_ver_ciclos():
         ui.vazio("Nenhum ciclo registado.")
         return
 
+    df["fim"] = [descrever_fim(r) for r in df.to_dict("records")]
+    df["data_inicio"] = df["data_inicio"].map(ui.data_curta)
+    df["data_fim"] = df["data_fim"].map(ui.data_curta)
+    df = df.drop(columns=["fim_tipo", "fim_idade", "fim_peso_g"])
     st.dataframe(
         df, width="stretch", hide_index=True,
+        column_order=["codigo", "data_inicio", "data_fim", "n_aves_alojadas", "linhagem",
+                      "sexo", "fim", "estado", "responsavel"],
         column_config={
             "codigo": "Código", "data_inicio": "Início", "data_fim": "Fim",
             "n_aves_alojadas": st.column_config.NumberColumn("Aves alojadas", format="%d"),
-            "linhagem": "Linhagem", "sexo": "Sexo", "estado": "Estado",
+            "linhagem": "Linhagem", "sexo": "Sexo", "fim": "Termina por", "estado": "Estado",
             "responsavel": "Responsável",
         },
     )
@@ -431,6 +533,19 @@ def modulo_ver_ciclos():
                     conn.commit()
                 st.success("Ciclo reactivado.")
                 st.rerun()
+
+        ui.secao("Alterar o fim do ciclo", "por exemplo, se decidirem abater mais cedo ou mais tarde")
+        ciclo = next(c for c in _ciclos() if c["id"] == cid)
+        st.caption(f"Actualmente termina por {descrever_fim(ciclo)}.")
+        fim_tipo, fim_idade, fim_peso = _controlo_fim(f"ver_{cid}", ciclo)
+        if st.button("Guardar o novo fim", icon=":material/event:"):
+            with conectar() as conn:
+                conn.cursor().execute(
+                    "UPDATE ciclos SET fim_tipo=%s, fim_idade=%s, fim_peso_g=%s WHERE id = %s",
+                    (fim_tipo, fim_idade, fim_peso, cid))
+                conn.commit()
+            st.success("Fim do ciclo actualizado.")
+            st.rerun()
 
 
 # ======================================================================
@@ -504,6 +619,7 @@ def modulo_registo_diario():
                     "n_bebedouros": n_beb, "n_comedouros": n_com, "area_m2": area_m2,
                 }
                 alertas = avaliar(cid, registo)
+                alertas += avaliar_abate(cid, str(data_reg))
                 guardar_alertas(cid, str(data_reg), alertas)
                 st.session_state["_ultimo_registo"] = (dia, alertas)
             except Exception as e:
@@ -541,7 +657,9 @@ def modulo_registo_diario():
 
 
 def modulo_pesagens():
-    ui.cabecalho("Pesagens", "Registe a pesagem semanal de uma amostra de aves. O peso médio é calculado automaticamente.",
+    ui.cabecalho("Pesagens",
+                 "Registe a pesagem de uma amostra de aves. Com o peso de cada ave, o sistema calcula "
+                 "também a uniformidade do lote, que apoia a decisão de abate.",
                  "Operação diária")
     cid = _selecionar_ciclo("Ciclo", chave="pes_ciclo")
     if cid is None:
@@ -552,42 +670,104 @@ def modulo_pesagens():
         cur.execute("SELECT data_inicio FROM ciclos WHERE id = %s", (cid,))
         inicio = datetime.strptime(cur.fetchone()["data_inicio"], "%Y-%m-%d").date()
 
+    modos = ["Peso de cada ave (calcula a uniformidade)", "Só o peso total da amostra"]
+    modo = st.radio("Como quer registar?", modos, horizontal=True, key="pes_modo")
+
     with st.form("pesagem"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            data_pes = st.date_input("Data da pesagem", value=date.today(), format="DD/MM/YYYY")
-        with col2:
-            n_amostra = st.number_input("Nº de aves amostradas", min_value=1, value=20)
-        with col3:
-            peso_total = st.number_input("Peso total da amostra (kg)", min_value=0.0, value=0.0, step=0.1)
+        data_pes = st.date_input("Data da pesagem", value=date.today(), format="DD/MM/YYYY")
+        if modo == modos[0]:
+            texto = st.text_area(
+                "Peso de cada ave, em gramas",
+                placeholder="ex.: 1720 1650 1805 1690 1740 ...",
+                help="Escreva os pesos separados por espaços ou um por linha. "
+                     "Recomenda-se pesar pelo menos 30 aves de vários pontos do aviário.",
+                height=110,
+            )
+            n_amostra, peso_total = None, None
+        else:
+            c1, c2 = st.columns(2)
+            n_amostra = c1.number_input("Nº de aves amostradas", min_value=1, value=20)
+            peso_total = c2.number_input("Peso total da amostra (kg)", min_value=0.0, value=0.0, step=0.1)
+            texto = None
 
         if st.form_submit_button("Registar pesagem", type="primary", icon=":material/scale:"):
-            peso_medio_g = (peso_total * 1000) / n_amostra if n_amostra else 0
             dia = (data_pes - inicio).days
-            with conectar() as conn:
-                conn.cursor().execute("""
-                    INSERT INTO pesagens
-                        (ciclo_id, data, dia_ciclo, n_aves_amostra, peso_medio_g, peso_total_kg)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (cid, str(data_pes), dia, n_amostra, peso_medio_g, peso_total))
-                conn.commit()
-            st.success(f"Pesagem registada: peso médio de **{num(peso_medio_g, 1)} g** no dia {dia}.")
+            unif = cv = None
+            pesos_txt = None
+            erro = None
+            if texto is not None:
+                try:
+                    pesos = ler_pesos(texto)
+                except ValueError as e:
+                    pesos, erro = [], str(e)
+                if not erro and len(pesos) < 2:
+                    erro = "Escreva o peso de pelo menos 2 aves."
+                if not erro:
+                    u = calcular_uniformidade(pesos)
+                    n_amostra, peso_medio_g = u["n"], u["media"]
+                    peso_total = round(sum(pesos) / 1000, 3)
+                    unif, cv = u["uniformidade_pct"], u["cv_pct"]
+                    pesos_txt = " ".join(f"{p:g}" for p in pesos)
+            else:
+                if peso_total <= 0:
+                    erro = "Indique o peso total da amostra."
+                peso_medio_g = (peso_total * 1000) / n_amostra if n_amostra else 0
+
+            if erro:
+                st.error(erro)
+            else:
+                with conectar() as conn:
+                    conn.cursor().execute("""
+                        INSERT INTO pesagens
+                            (ciclo_id, data, dia_ciclo, n_aves_amostra, peso_medio_g, peso_total_kg,
+                             uniformidade_pct, cv_pct, pesos_individuais)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (cid, str(data_pes), dia, n_amostra, peso_medio_g, peso_total,
+                          unif, cv, pesos_txt))
+                    conn.commit()
+                abate = avaliar_abate(cid, str(data_pes))
+                guardar_alertas(cid, str(data_pes), abate)
+                st.session_state["_ultima_pesagem"] = (dia, n_amostra, peso_medio_g, unif, cv, abate)
+
+    if "_ultima_pesagem" in st.session_state:
+        dia, n, media, unif, cv, abate = st.session_state.pop("_ultima_pesagem")
+        msg = f"Pesagem do dia {dia} registada: {n} aves, peso médio de **{num(media, 0)} g**"
+        if unif is not None:
+            minimo = uniformidade_minima()
+            msg += f", uniformidade de **{num(unif, 0)}%**"
+            msg += f" (CV {num(cv, 1)}%)" if cv is not None else ""
+            msg += "." if unif >= minimo else f", abaixo do mínimo de {num(minimo)}%."
+        else:
+            msg += "."
+        st.success(msg)
+        codigo = next((c["codigo"] for c in _ciclos() if c["id"] == cid), "")
+        for a in abate:
+            st.markdown(ui.alerta_html({**a, "ciclo_codigo": codigo, "data": "hoje"}),
+                        unsafe_allow_html=True)
 
     ui.secao("Histórico de pesagens")
     with conectar() as conn:
         df = ler_df("""
-            SELECT data, dia_ciclo, n_aves_amostra, peso_medio_g, peso_total_kg
+            SELECT data, dia_ciclo, n_aves_amostra, peso_medio_g, peso_total_kg,
+                   uniformidade_pct, cv_pct
             FROM pesagens WHERE ciclo_id = %s
             ORDER BY dia_ciclo DESC
         """, conn, params=(cid,))
     if df.empty:
         ui.vazio("Sem pesagens ainda neste ciclo.")
     else:
+        df["data"] = df["data"].map(ui.data_curta)
+        for c in ["uniformidade_pct", "cv_pct"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
         st.dataframe(df, width="stretch", hide_index=True, column_config={
             "data": "Data", "dia_ciclo": "Dia", "n_aves_amostra": "Aves na amostra",
             "peso_medio_g": st.column_config.NumberColumn("Peso médio (g)", format="%.0f"),
             "peso_total_kg": st.column_config.NumberColumn("Peso total (kg)", format="%.2f"),
+            "uniformidade_pct": st.column_config.NumberColumn("Uniformidade (%)", format="%.0f"),
+            "cv_pct": st.column_config.NumberColumn("CV (%)", format="%.1f"),
         })
+        st.caption("Uniformidade: percentagem de aves com peso dentro de 10% do peso médio. "
+                   "CV: coeficiente de variação (quanto menor, mais homogéneo o lote).")
 
 
 # ======================================================================
@@ -672,17 +852,19 @@ def modulo_vendas():
         with col1:
             data_v = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
             n_aves = st.number_input("Nº de aves vendidas", min_value=1, value=100)
-            cliente = st.text_input("Cliente (opcional)")
+            destino = st.selectbox("Destino", DESTINOS)
         with col2:
             peso_total = st.number_input("Peso total (kg)", min_value=0.0, value=0.0, step=0.5)
             preco_kg = st.number_input("Preço por kg (MZN)", min_value=0.0, value=380.0, step=5.0)
+            cliente = st.text_input("Cliente ou nota (opcional)")
 
         if st.form_submit_button("Registar venda", type="primary", icon=":material/point_of_sale:"):
             with conectar() as conn:
                 conn.cursor().execute("""
-                    INSERT INTO vendas (ciclo_id, data, n_aves, peso_total_kg, preco_por_kg, cliente)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (cid, str(data_v), n_aves, peso_total, preco_kg, cliente))
+                    INSERT INTO vendas (ciclo_id, data, n_aves, peso_total_kg, preco_por_kg,
+                                        cliente, destino)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (cid, str(data_v), n_aves, peso_total, preco_kg, cliente, destino))
                 conn.commit()
             st.success(f"Venda de **{num(peso_total, 1)} kg** por **{mzn(peso_total * preco_kg, 2)}** registada.")
 
@@ -697,18 +879,34 @@ def modulo_vendas():
     with conectar() as conn:
         df = ler_df("""
             SELECT data, n_aves, peso_total_kg, preco_por_kg,
-                   (peso_total_kg * preco_por_kg) AS total_mzn, cliente
+                   (peso_total_kg * preco_por_kg) AS total_mzn, destino, cliente
             FROM vendas WHERE ciclo_id = %s
             ORDER BY data DESC
         """, conn, params=(cid,))
     if not df.empty:
+        df["destino"] = df["destino"].replace("", "Sem destino indicado")
+        por_destino = (df.groupby("destino", as_index=False)
+                       .agg(Aves=("n_aves", "sum"), Receita=("total_mzn", "sum"))
+                       .rename(columns={"destino": "Destino"}))
+        ui.secao("Vendas por destino")
+        with st.container(border=True, key="caixa_destino"):
+            graf = alt.Chart(por_destino).mark_bar(
+                cornerRadiusTopRight=5, cornerRadiusBottomRight=5, color=P["g700"]).encode(
+                x=alt.X("Aves:Q", title="Aves vendidas", axis=alt.Axis(format="d")),
+                y=alt.Y("Destino:N", sort="-x", title=None),
+                tooltip=["Destino", alt.Tooltip("Aves:Q", format="d"),
+                         alt.Tooltip("Receita:Q", format=",.0f", title="Receita (MZN)")],
+            ).properties(height=max(110, 42 * len(por_destino)))
+            st.altair_chart(ui.tema_grafico(graf), use_container_width=True)
+
         ui.secao("Histórico de vendas")
+        df["data"] = df["data"].map(ui.data_curta)
         st.dataframe(df, width="stretch", hide_index=True, column_config={
             "data": "Data", "n_aves": "Aves",
             "peso_total_kg": st.column_config.NumberColumn("Peso (kg)", format="%.1f"),
             "preco_por_kg": st.column_config.NumberColumn("Preço/kg (MZN)", format="%.2f"),
             "total_mzn": st.column_config.NumberColumn("Total (MZN)", format="%.2f"),
-            "cliente": "Cliente",
+            "destino": "Destino", "cliente": "Cliente ou nota",
         })
 
 
@@ -723,9 +921,11 @@ def modulo_indicadores():
 
     r = resumo_ciclo(cid)
     ciclo = next(c for c in _ciclos() if c["id"] == cid)
+    dia = _dia_ciclo(ciclo, r)
     ui.secao("Técnicos")
-    ui.grelha([
-        ui.kpi_html("Dia do ciclo", str(_dia_ciclo(ciclo, r)), "dias", "", "calendario", "neutro"),
+    extra = [c for c in [_cartao_fim(ciclo, r, dia), _cartao_uniformidade(r)] if c]
+    ui.grelha(extra + [
+        ui.kpi_html("Dia do ciclo", str(dia), "dias", "", "calendario", "neutro"),
         ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", "", "ovo", "verde"),
         ui.kpi_html("Mortalidade", num(r["mortalidade_pct"], 1), "%", "", "pulso", "verm" if r["mortalidade_pct"] > 8 else "verde"),
         ui.kpi_html("Viabilidade", num(r["viabilidade_pct"], 1), "%", "", "escudo", "verde"),
@@ -746,10 +946,11 @@ def modulo_indicadores():
         ui.kpi_html("Custo por ave", num(r["custo_por_ave"], 2), "MZN", "", "ovo", "ouro"),
         ui.kpi_html("Receita", num(r["receita"]), "MZN", "", "nota", "verde"),
     ] + _cartoes_margem(r) + [
+        _cartao_roi(r),
         ui.kpi_html("Ponto de equilíbrio", num(pe), "kg", "quilos a vender para cobrir custos", "medalha", "azul"),
     ])
 
-    ui.secao("Comparação com a referência")
+    ui.secao("Comparação com a referência", ciclo["linhagem"])
     semas = semaforos(cid)
     if semas:
         casas = {"Peso médio (g)": 0, "ICA": 2}
@@ -934,11 +1135,108 @@ def modulo_utilizadores():
             p = st.text_input("Palavra-passe", type="password")
             papel = st.selectbox("Papel", ["operador", "administrador"])
         if st.form_submit_button("Criar utilizador", type="primary", icon=":material/person_add:"):
-            if registar_utilizador(u, n, p, papel):
+            if not u.strip() or not n.strip() or len(p) < 6:
+                st.error("Preencha o utilizador e o nome, com uma palavra-passe de pelo menos 6 caracteres.")
+            elif registar_utilizador(u.strip(), n.strip(), p, papel):
                 st.success("Utilizador criado.")
                 st.rerun()
             else:
                 st.error("Esse utilizador já existe.")
+
+    ui.secao("Repor a palavra-passe de um utilizador",
+             "para quando alguém se esquece da sua")
+    with st.form("repor_pw"):
+        nomes = df["username"].tolist()
+        alvo = st.selectbox("Utilizador", nomes)
+        nova = st.text_input("Nova palavra-passe", type="password")
+        if st.form_submit_button("Repor palavra-passe", icon=":material/lock_reset:"):
+            if len(nova) < 6:
+                st.error("A palavra-passe deve ter pelo menos 6 caracteres.")
+            else:
+                definir_palavra_passe(alvo, nova)
+                st.success(f"Palavra-passe de {alvo} reposta. Comunique-a ao utilizador.")
+
+
+def modulo_conta():
+    user = st.session_state.user
+    ui.cabecalho("A minha conta", f"{user['nome_completo']} · @{user['username']} · {user['papel']}", "Conta")
+    ui.secao("Mudar a palavra-passe")
+    with st.form("mudar_pw"):
+        actual = st.text_input("Palavra-passe actual", type="password")
+        nova = st.text_input("Nova palavra-passe", type="password",
+                             help="Pelo menos 6 caracteres. Evite datas de nascimento e o nome.")
+        conf = st.text_input("Repita a nova palavra-passe", type="password")
+        if st.form_submit_button("Guardar nova palavra-passe", type="primary", icon=":material/key:"):
+            if nova != conf:
+                st.error("As duas palavras-passe novas não são iguais.")
+            else:
+                ok, msg = mudar_palavra_passe(user["username"], actual, nova)
+                if ok:
+                    st.session_state.aviso_pw = False
+                    st.success(msg + " Use a nova palavra-passe da próxima vez que entrar.")
+                else:
+                    st.error(msg)
+
+
+VIAS = ["Água de bebida", "Spray", "Ocular ou nasal", "Injecção", "Ração", "Outra"]
+
+
+def modulo_sanitario():
+    ui.cabecalho("Vacinas e medicamentos",
+                 "Registe cada vacina ou tratamento aplicado ao lote, com a data e a dose. "
+                 "O custo dos produtos lança-se em Custos, na categoria Medicamentos e vacinas.",
+                 "Operação diária")
+    cid = _selecionar_ciclo("Ciclo", chave="san_ciclo")
+    if cid is None:
+        return
+    ciclo = next(c for c in _ciclos() if c["id"] == cid)
+    inicio = datetime.strptime(ciclo["data_inicio"], "%Y-%m-%d").date()
+    aves_vivas = resumo_ciclo(cid)["aves_vivas"]
+
+    with st.form("sanitario"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            data_s = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
+            tipo = st.selectbox("Tipo", ["Vacina", "Medicamento", "Vitaminas e outros"])
+        with c2:
+            produto = st.text_input("Produto", placeholder="ex.: Vacina contra Newcastle")
+            finalidade = st.text_input("Para quê", placeholder="ex.: prevenção de Newcastle")
+        with c3:
+            dose = st.text_input("Dose", placeholder="ex.: 1 frasco por 1000 aves")
+            via = st.selectbox("Via de aplicação", VIAS)
+        c4, c5 = st.columns([1, 2])
+        n_aves = c4.number_input("Aves tratadas", min_value=0, value=int(aves_vivas), step=10)
+        obs = c5.text_input("Observações (opcional)")
+        if st.form_submit_button("Registar aplicação", type="primary", icon=":material/vaccines:"):
+            if not produto.strip():
+                st.error("Indique o produto aplicado.")
+            else:
+                with conectar() as conn:
+                    conn.cursor().execute("""
+                        INSERT INTO sanitario (ciclo_id, data, dia_ciclo, tipo, produto,
+                            finalidade, dose, via, n_aves, observacoes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (cid, str(data_s), (data_s - inicio).days, tipo, produto.strip(),
+                          finalidade, dose, via, n_aves, obs))
+                    conn.commit()
+                st.success(f"{tipo} **{produto.strip()}** registada no dia {(data_s - inicio).days} do ciclo.")
+
+    ui.secao("Histórico do ciclo")
+    with conectar() as conn:
+        df = ler_df("""
+            SELECT data, dia_ciclo, tipo, produto, finalidade, dose, via, n_aves, observacoes
+            FROM sanitario WHERE ciclo_id = %s ORDER BY data DESC, id DESC
+        """, conn, params=(cid,))
+    if df.empty:
+        ui.vazio("Ainda não há vacinas nem medicamentos registados neste ciclo.")
+    else:
+        df["data"] = df["data"].map(ui.data_curta)
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "data": "Data", "dia_ciclo": "Dia", "tipo": "Tipo", "produto": "Produto",
+            "finalidade": "Para quê", "dose": "Dose", "via": "Via",
+            "n_aves": st.column_config.NumberColumn("Aves", format="%d"),
+            "observacoes": "Observações",
+        })
 
 
 # ======================================================================
@@ -949,7 +1247,9 @@ MODULOS = {
     "dashboard": modulo_dashboard,
     "alertas": modulo_alertas,
     "registo": modulo_registo_diario,
+    "semanal": lambda: pagina_registo_semanal(_selecionar_ciclo),
     "pesagens": modulo_pesagens,
+    "sanitario": modulo_sanitario,
     "novo": modulo_novo_ciclo,
     "ciclos": modulo_ver_ciclos,
     "importar": pagina_importar,
@@ -958,7 +1258,9 @@ MODULOS = {
     "indicadores": modulo_indicadores,
     "sensibilidade": modulo_sensibilidade,
     "relatorios": modulo_relatorios,
+    "linhagens": pagina_linhagens,
     "utilizadores": modulo_utilizadores,
+    "conta": modulo_conta,
 }
 
 
@@ -976,7 +1278,9 @@ def _menu_lateral(user: dict):
         ]),
         ("Operação diária", [
             ("registo", "Registo diário", ":material/edit_note:"),
+            ("semanal", "Registo semanal", ":material/date_range:"),
             ("pesagens", "Pesagens", ":material/scale:"),
+            ("sanitario", "Vacinas e medicamentos", ":material/vaccines:"),
         ]),
         ("Ciclos", [
             ("novo", "Novo ciclo", ":material/add_circle:"),
@@ -993,6 +1297,7 @@ def _menu_lateral(user: dict):
             ("relatorios", "Relatórios PDF", ":material/picture_as_pdf:"),
         ]),
         ("Administração", [
+            ("linhagens", "Linhagens de referência", ":material/genetics:"),
             ("utilizadores", "Utilizadores", ":material/group:"),
         ]),
     ]
@@ -1019,6 +1324,9 @@ def _menu_lateral(user: dict):
             f'<div><b>{user["nome_completo"]}</b><small>@{user["username"]} · {user["papel"]}</small></div></div>',
             unsafe_allow_html=True,
         )
+        st.button("A minha conta", icon=":material/key:", width="stretch",
+                  type="primary" if st.session_state.pagina == "conta" else "tertiary",
+                  key="nav_conta", on_click=_ir_para, args=("conta",))
         if st.button("Terminar sessão", icon=":material/logout:", width="stretch", type="tertiary"):
             st.session_state.clear()
             st.rerun()
@@ -1033,6 +1341,12 @@ def main():
         st.session_state.pagina = "inicio"
 
     _menu_lateral(st.session_state.user)
+    if st.session_state.get("aviso_pw") and st.session_state.pagina != "conta":
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        c1.warning("Está a usar a palavra-passe de origem (admin123). Como o sistema está na "
+                   "internet, mude-a já para proteger os dados da granja.")
+        c2.button("Mudar agora", type="primary", icon=":material/key:", width="stretch",
+                  on_click=_ir_para, args=("conta",))
     MODULOS[st.session_state.pagina]()
 
 

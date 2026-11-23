@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 from fpdf import FPDF
 
-from calculos import resumo_ciclo, semaforos
+from calculos import resumo_ciclo, semaforos, descrever_fim
 from sensibilidade import tabela_cenarios
 from database import conectar
 
@@ -102,6 +102,7 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
         ("Linhagem", ciclo["linhagem"]),
         ("Sexo", ciclo["sexo"]),
         ("Numero de aves alojadas", f"{ciclo['n_aves_alojadas']:,}".replace(",", ".")),
+        ("Fim do ciclo", descrever_fim(ciclo)),
         ("Responsavel", ciclo["utilizador"]),
         ("Estado", ciclo["estado"]),
     ]
@@ -128,6 +129,9 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
         ("Indice de Eficiencia Produtiva (IEP)", f"{r['iep']}"),
         ("Peso vivo total actual", f"{r['peso_vivo_total_kg']} kg"),
     ]
+    if r.get("uniformidade_pct") is not None:
+        tec.append(("Uniformidade (ultima pesagem)", f"{r['uniformidade_pct']}%"
+                    + (f"  (CV {r['cv_pct']}%)" if r.get("cv_pct") is not None else "")))
     for k, v in tec:
         pdf.cell(80, 6, k)
         pdf.cell(0, 6, v, new_x="LMARGIN", new_y="NEXT")
@@ -137,7 +141,7 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
     # Comparação com referência
     if semas:
         pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 7, "3. Comparacao com referencia Ross 308",
+        pdf.cell(0, 7, f"3. Comparacao com a referencia {ciclo['linhagem']}",
                  new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(70, 6, "Indicador", border=1)
@@ -169,6 +173,8 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
         ("Kg vendidos", f"{r['kg_vendidos']} kg"),
         ("Margem bruta", f"{_formatar_mzn(r['margem_bruta'])}  ({r['margem_bruta_pct']}%)"),
         ("Margem liquida", f"{_formatar_mzn(r['margem_liquida'])}  ({r['margem_liquida_pct']}%)"),
+        ("Retorno sobre o investimento",
+         f"{r['roi_pct']}%" if r.get("roi_pct") is not None else "sem vendas registadas"),
         ("Ponto de equilibrio (kg)", f"{r['ponto_equilibrio_kg']}"),
     ]
     for k, v in econ:
@@ -210,11 +216,36 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
             pdf.cell(32, 6, f"{valor:,.0f}".replace(",", "."), border=1, align="R")
         pdf.ln()
 
+    # Vacinas e medicamentos
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT data, dia_ciclo, tipo, produto, dose, via FROM sanitario
+            WHERE ciclo_id = %s ORDER BY data
+        """, (ciclo_id,))
+        san = cur.fetchall()
+    if san:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "6. Vacinas e medicamentos aplicados", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "B", 9)
+        for t, w in [("Data", 24), ("Dia", 12), ("Tipo", 30), ("Produto", 60), ("Dose", 34), ("Via", 30)]:
+            pdf.cell(w, 6, t, border=1, align="C")
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
+        for s_ in san:
+            d = s_["data"]
+            d = f"{d[8:10]}/{d[5:7]}/{d[0:4]}" if len(d) >= 10 else d
+            for v, w in [(d, 24), (str(s_["dia_ciclo"]), 12), (s_["tipo"], 30),
+                         ((s_["produto"] or "")[:38], 60), ((s_["dose"] or "")[:20], 34), ((s_["via"] or "")[:18], 30)]:
+                pdf.cell(w, 6, v, border=1)
+            pdf.ln()
+
     # Observações
     if ciclo.get("observacoes"):
         pdf.ln(5)
         pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 7, "6. Observacoes", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, "7. Observacoes", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
         pdf.multi_cell(0, 6, ciclo["observacoes"])
 

@@ -160,8 +160,44 @@ def inicializar_bd():
                 mortalidade_acumulada_pct REAL,
                 UNIQUE (linhagem, dia)
             );
+
+            -- Registo sanitário: vacinas e medicamentos aplicados ao lote
+            CREATE TABLE IF NOT EXISTS sanitario (
+                id SERIAL PRIMARY KEY,
+                ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+                data TEXT NOT NULL,
+                dia_ciclo INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                produto TEXT NOT NULL,
+                finalidade TEXT,
+                dose TEXT,
+                via TEXT,
+                n_aves INTEGER,
+                observacoes TEXT
+            );
+
+            -- Parâmetros gerais do sistema (chave/valor)
+            CREATE TABLE IF NOT EXISTS configuracoes (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL
+            );
+
+            -- Colunas acrescentadas depois do pré-teste (seguras para bases antigas)
+            ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_tipo TEXT NOT NULL DEFAULT 'idade';
+            ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_idade INTEGER NOT NULL DEFAULT 42;
+            ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_peso_g REAL;
+            ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS uniformidade_pct REAL;
+            ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS cv_pct REAL;
+            ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS pesos_individuais TEXT;
+            ALTER TABLE vendas ADD COLUMN IF NOT EXISTS destino TEXT;
+            ALTER TABLE parametros_referencia ADD COLUMN IF NOT EXISTS fonte TEXT;
             """)
             _popular_parametros_ross308(cur)
+            _popular_parametros_cobb500(cur)
+            cur.execute("""
+                INSERT INTO configuracoes (chave, valor) VALUES ('uniformidade_min', '80')
+                ON CONFLICT (chave) DO NOTHING
+            """)
         conn.commit()
 
 
@@ -188,6 +224,104 @@ def _popular_parametros_ross308(cur):
         """, ("Ross 308", dia, peso, ica, mort))
 
 
+FONTE_COBB500 = ("Cobb500 Broiler Performance & Nutrition Supplement (2022), "
+                  "objectivos de desempenho, sexos misturados (as hatched)")
+
+
+def _popular_parametros_cobb500(cur):
+    """Referência Cobb 500 (sexos misturados). Peso e ICA acumulado retirados
+    do suplemento oficial da Cobb (2022). O suplemento não indica
+    mortalidade acumulada, por isso esse campo fica vazio."""
+    cur.execute("SELECT COUNT(*) AS n FROM parametros_referencia WHERE linhagem=%s",
+                ("Cobb 500",))
+    if cur.fetchone()["n"] > 0:
+        return
+    dados = [
+        (0, 42, None),
+        (7, 202, 0.891),
+        (14, 570, 1.029),
+        (21, 1116, 1.182),
+        (28, 1783, 1.322),
+        (35, 2521, 1.441),
+        (42, 3278, 1.555),
+    ]
+    for dia, peso, ica in dados:
+        cur.execute("""
+            INSERT INTO parametros_referencia
+                (linhagem, dia, peso_medio_g, ica_acumulado, mortalidade_acumulada_pct, fonte)
+            VALUES (%s, %s, %s, %s, NULL, %s)
+        """, ("Cobb 500", dia, peso, ica, FONTE_COBB500))
+
+
+# ----------------------------------------------------------------------
+# Linhagens de referência
+# ----------------------------------------------------------------------
+def listar_linhagens() -> list[str]:
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT linhagem FROM parametros_referencia ORDER BY linhagem")
+            return [r["linhagem"] for r in cur.fetchall()]
+
+
+def guardar_linhagem(nome: str, linhas: list[dict], fonte: str | None = None):
+    """Substitui a tabela de referência de uma linhagem pelas linhas dadas
+    (cada linha: dia, peso_medio_g, ica_acumulado, mortalidade_acumulada_pct)."""
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM parametros_referencia WHERE linhagem = %s", (nome,))
+            for l in linhas:
+                cur.execute("""
+                    INSERT INTO parametros_referencia
+                        (linhagem, dia, peso_medio_g, ica_acumulado,
+                         mortalidade_acumulada_pct, fonte)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (nome, int(l["dia"]), l.get("peso_medio_g"), l.get("ica_acumulado"),
+                      l.get("mortalidade_acumulada_pct"), fonte))
+        conn.commit()
+
+
+def apagar_linhagem(nome: str):
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM parametros_referencia WHERE linhagem = %s", (nome,))
+        conn.commit()
+
+
+# ----------------------------------------------------------------------
+# Configurações
+# ----------------------------------------------------------------------
+def obter_config(chave: str, padrao: str | None = None) -> str | None:
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT valor FROM configuracoes WHERE chave = %s", (chave,))
+            row = cur.fetchone()
+    return row["valor"] if row else padrao
+
+
+def definir_config(chave: str, valor: str):
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO configuracoes (chave, valor) VALUES (%s, %s)
+                ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor
+            """, (chave, str(valor)))
+        conn.commit()
+
+
+def uniformidade_minima() -> float:
+    try:
+        return float(obter_config("uniformidade_min", "80"))
+    except (TypeError, ValueError):
+        return 80.0
+
+
+def _interp(a, b, frac):
+    """Interpola entre dois valores; devolve None se algum faltar."""
+    if a is None or b is None:
+        return None
+    return a + frac * (b - a)
+
+
 def obter_referencia(linhagem: str, dia: int) -> dict | None:
     with conectar() as conn:
         with conn.cursor() as cur:
@@ -202,6 +336,7 @@ def obter_referencia(linhagem: str, dia: int) -> dict | None:
     if not rows:
         return None
 
+    campos = ("peso_medio_g", "ica_acumulado", "mortalidade_acumulada_pct")
     anterior = rows[0]
     for row in rows:
         if row["dia"] == dia:
@@ -211,11 +346,9 @@ def obter_referencia(linhagem: str, dia: int) -> dict | None:
             if d2 == d1:
                 return dict(row)
             frac = (dia - d1) / (d2 - d1)
-            return {
-                "dia": dia,
-                "peso_medio_g": anterior["peso_medio_g"] + frac * (row["peso_medio_g"] - anterior["peso_medio_g"]),
-                "ica_acumulado": anterior["ica_acumulado"] + frac * (row["ica_acumulado"] - anterior["ica_acumulado"]),
-                "mortalidade_acumulada_pct": anterior["mortalidade_acumulada_pct"] + frac * (row["mortalidade_acumulada_pct"] - anterior["mortalidade_acumulada_pct"]),
-            }
+            resultado = {"dia": dia}
+            for c in campos:
+                resultado[c] = _interp(anterior[c], row[c], frac)
+            return resultado
         anterior = row
     return dict(rows[-1])

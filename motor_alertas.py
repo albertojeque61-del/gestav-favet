@@ -200,6 +200,74 @@ def avaliar(ciclo_id: int, registo: dict) -> list[dict]:
     return alertas
 
 
+def avaliar_abate(ciclo_id: int, data_ref: str | None = None) -> list[dict]:
+    """Verifica se o lote chegou ao fim definido para o ciclo (idade ou
+    peso-alvo) e, se houver pesagem individual, se a uniformidade está
+    acima do mínimo configurado. Não repete um alerta que já esteja aberto."""
+    from datetime import date, datetime
+    from database import uniformidade_minima
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ciclos WHERE id = %s", (ciclo_id,))
+            ciclo = cur.fetchone()
+            cur.execute("""
+                SELECT dia_ciclo, peso_medio_g, uniformidade_pct FROM pesagens
+                WHERE ciclo_id = %s ORDER BY dia_ciclo DESC, id DESC LIMIT 1
+            """, (ciclo_id,))
+            pes = cur.fetchone()
+            cur.execute("""
+                SELECT titulo FROM alertas
+                WHERE ciclo_id = %s AND resolvido = FALSE
+            """, (ciclo_id,))
+            abertos = {r["titulo"] for r in cur.fetchall()}
+    if ciclo is None or ciclo["estado"] != "activo":
+        return []
+
+    inicio = datetime.strptime(ciclo["data_inicio"], "%Y-%m-%d").date()
+    ref = datetime.strptime(data_ref, "%Y-%m-%d").date() if data_ref else date.today()
+    dia = (ref - inicio).days
+    minimo = uniformidade_minima()
+    peso = pes["peso_medio_g"] if pes else None
+    unif = pes["uniformidade_pct"] if pes else None
+
+    if ciclo["fim_tipo"] == "peso" and ciclo["fim_peso_g"]:
+        alvo = ciclo["fim_peso_g"]
+        atingido = peso is not None and peso >= alvo
+        criterio = f"peso médio de {_v(peso or 0, 0)} g (alvo {_v(alvo, 0)} g)"
+    else:
+        idade = ciclo["fim_idade"] or 42
+        atingido = dia >= idade
+        criterio = f"{dia} dias de idade (abate previsto aos {idade} dias)"
+        if peso:
+            criterio += f", peso médio da última pesagem {_v(peso, 0)} g"
+    if not atingido:
+        return []
+
+    alertas = []
+    if unif is not None and unif < minimo:
+        titulo = "Fim do ciclo atingido, uniformidade baixa"
+        if titulo not in abertos:
+            alertas.append({
+                "nivel": "aviso",
+                "titulo": titulo,
+                "mensagem": f"O lote atingiu {criterio}, mas a uniformidade é de "
+                            f"{_v(unif, 0)}% (mínimo definido: {_v(minimo, 0)}%).",
+                "recomendacao": "Avaliar se compensa abater já ou separar as aves mais leves e abatê-las mais tarde. Rever a distribuição de comedouros e bebedouros e a densidade para os próximos lotes.",
+            })
+    else:
+        titulo = "Lote pronto para abate"
+        if titulo not in abertos:
+            extra = f" Uniformidade de {_v(unif, 0)}%." if unif is not None else ""
+            alertas.append({
+                "nivel": "info",
+                "titulo": titulo,
+                "mensagem": f"O lote atingiu {criterio}.{extra}",
+                "recomendacao": "Planear o abate: confirmar compradores e transporte, fazer o jejum alimentar antes da apanha e registar a venda no sistema.",
+            })
+    return alertas
+
+
 def guardar_alertas(ciclo_id: int, data: str, alertas: list[dict]):
     """Grava os alertas na tabela alertas."""
     if not alertas:

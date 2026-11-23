@@ -113,3 +113,34 @@ VALUES
     ('Ross 308', 35, 2200, 1.60, 4.0),
     ('Ross 308', 42, 2902, 1.73, 5.0)
 ON CONFLICT (linhagem, dia) DO NOTHING;
+
+-- ---------------------------------------------------------------
+-- Alterações introduzidas depois do pré-teste (Novembro de 2026)
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sanitario (
+    id SERIAL PRIMARY KEY,
+    ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    dia_ciclo INTEGER NOT NULL,
+    tipo TEXT NOT NULL,
+    produto TEXT NOT NULL,
+    finalidade TEXT,
+    dose TEXT,
+    via TEXT,
+    n_aves INTEGER,
+    observacoes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS configuracoes (
+    chave TEXT PRIMARY KEY,
+    valor TEXT NOT NULL
+);
+
+ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_tipo TEXT NOT NULL DEFAULT 'idade';
+ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_idade INTEGER NOT NULL DEFAULT 42;
+ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS fim_peso_g REAL;
+ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS uniformidade_pct REAL;
+ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS cv_pct REAL;
+ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS pesos_individuais TEXT;
+ALTER TABLE vendas ADD COLUMN IF NOT EXISTS destino TEXT;
+ALTER TABLE parametros_referencia ADD COLUMN IF NOT EXISTS fonte TEXT;

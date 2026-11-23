@@ -2,6 +2,8 @@
 Camada de lógica: cálculo dos indicadores técnicos e económicos.
 """
 
+import statistics
+
 from database import conectar, obter_referencia
 
 
@@ -198,11 +200,14 @@ def margens(ciclo_id: int) -> dict:
     liquida = r - c["total"]
     pct_bruta = (bruta / r * 100) if r else 0.0
     pct_liquida = (liquida / r * 100) if r else 0.0
+    # Retorno sobre o investimento: lucro líquido por cada metical gasto
+    roi = (liquida / c["total"] * 100) if (r and c["total"]) else None
     return {
         "margem_bruta": round(bruta, 2),
         "margem_liquida": round(liquida, 2),
         "margem_bruta_pct": round(pct_bruta, 1),
         "margem_liquida_pct": round(pct_liquida, 1),
+        "roi_pct": round(roi, 1) if roi is not None else None,
     }
 
 
@@ -241,12 +246,13 @@ def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
 
 
 # ----------------------------------------------------------------------
-# Comparação com referência Ross 308: semáforos
+# Comparação com a referência da linhagem: semáforos
 # ----------------------------------------------------------------------
 
 def semaforos(ciclo_id: int) -> dict:
-    """Compara indicadores actuais com referência Ross 308. Devolve
-    dicionário com {indicador: ("verde"/"amarelo"/"vermelho", desvio_pct)}."""
+    """Compara indicadores actuais com a referência da linhagem do ciclo.
+    Devolve {indicador: (actual, referência, (cor, desvio_pct))}. Os
+    indicadores sem valor de referência para essa linhagem são omitidos."""
     gmd_info = ganho_medio_diario(ciclo_id)
     dia = gmd_info["dia"]
     if dia == 0:
@@ -277,27 +283,30 @@ def semaforos(ciclo_id: int) -> dict:
         return ("vermelho", round(desvio, 1))
 
     # Peso médio: maior ou igual à referência é bom
-    resultado["Peso médio (g)"] = (
-        gmd_info["peso_actual_g"],
-        ref["peso_medio_g"],
-        avaliar(gmd_info["peso_actual_g"], ref["peso_medio_g"]),
-    )
+    if ref.get("peso_medio_g"):
+        resultado["Peso médio (g)"] = (
+            gmd_info["peso_actual_g"],
+            ref["peso_medio_g"],
+            avaliar(gmd_info["peso_actual_g"], ref["peso_medio_g"]),
+        )
 
     # ICA: menor é melhor
-    ica_actual = conversao_alimentar(ciclo_id)
-    resultado["ICA"] = (
-        ica_actual,
-        ref["ica_acumulado"],
-        avaliar(ica_actual, ref["ica_acumulado"], menor_melhor=True),
-    )
+    if ref.get("ica_acumulado"):
+        ica_actual = conversao_alimentar(ciclo_id)
+        resultado["ICA"] = (
+            ica_actual,
+            ref["ica_acumulado"],
+            avaliar(ica_actual, ref["ica_acumulado"], menor_melhor=True),
+        )
 
     # Mortalidade: menor é melhor
-    mort_pct = mortalidade_acumulada(ciclo_id)["pct"]
-    resultado["Mortalidade acumulada (%)"] = (
-        mort_pct,
-        ref["mortalidade_acumulada_pct"],
-        avaliar(mort_pct, ref["mortalidade_acumulada_pct"], menor_melhor=True),
-    )
+    if ref.get("mortalidade_acumulada_pct"):
+        mort_pct = mortalidade_acumulada(ciclo_id)["pct"]
+        resultado["Mortalidade acumulada (%)"] = (
+            mort_pct,
+            ref["mortalidade_acumulada_pct"],
+            avaliar(mort_pct, ref["mortalidade_acumulada_pct"], menor_melhor=True),
+        )
 
     return resultado
 
@@ -333,5 +342,89 @@ def resumo_ciclo(ciclo_id: int) -> dict:
         "margem_liquida": m["margem_liquida"],
         "margem_bruta_pct": m["margem_bruta_pct"],
         "margem_liquida_pct": m["margem_liquida_pct"],
+        "roi_pct": m["roi_pct"],
         "ponto_equilibrio_kg": ponto_equilibrio(ciclo_id)["kg"],
+        **ultima_uniformidade(ciclo_id),
     }
+
+
+# ----------------------------------------------------------------------
+# Uniformidade do lote (pesagem individual)
+# ----------------------------------------------------------------------
+
+def ler_pesos(texto: str) -> list[float]:
+    """Converte o texto escrito pelo utilizador numa lista de pesos (g).
+    Aceita números separados por espaços, quebras de linha, ponto e vírgula
+    ou vírgula seguida de espaço; a vírgula entre algarismos é decimal."""
+    if not texto:
+        return []
+    t = texto.replace(";", " ").replace(", ", " ").replace("\n", " ")
+    pesos = []
+    for parte in t.split():
+        parte = parte.strip().strip(",")
+        if not parte:
+            continue
+        try:
+            pesos.append(float(parte.replace(",", ".")))
+        except ValueError:
+            raise ValueError(f"Valor não reconhecido: «{parte}»")
+    return [p for p in pesos if p > 0]
+
+
+def calcular_uniformidade(pesos: list[float], faixa_pct: float = 10.0) -> dict:
+    """Uniformidade = % de aves com peso dentro de ±faixa% do peso médio.
+    CV = desvio-padrão / média × 100."""
+    if not pesos:
+        return {"n": 0, "media": 0.0, "uniformidade_pct": None, "cv_pct": None}
+    media = sum(pesos) / len(pesos)
+    lim_inf, lim_sup = media * (1 - faixa_pct / 100), media * (1 + faixa_pct / 100)
+    dentro = sum(1 for p in pesos if lim_inf <= p <= lim_sup)
+    cv = (statistics.stdev(pesos) / media * 100) if len(pesos) > 1 and media else None
+    return {
+        "n": len(pesos),
+        "media": round(media, 1),
+        "uniformidade_pct": round(dentro / len(pesos) * 100, 1),
+        "cv_pct": round(cv, 1) if cv is not None else None,
+    }
+
+
+def ultima_uniformidade(ciclo_id: int) -> dict:
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT uniformidade_pct, cv_pct FROM pesagens
+            WHERE ciclo_id = %s AND uniformidade_pct IS NOT NULL
+            ORDER BY dia_ciclo DESC, id DESC LIMIT 1
+        """, (ciclo_id,))
+        row = cur.fetchone()
+    return {
+        "uniformidade_pct": row["uniformidade_pct"] if row else None,
+        "cv_pct": row["cv_pct"] if row else None,
+    }
+
+
+# ----------------------------------------------------------------------
+# Fim do ciclo (por idade ou por peso-alvo)
+# ----------------------------------------------------------------------
+
+def descrever_fim(ciclo: dict) -> str:
+    if ciclo.get("fim_tipo") == "peso" and ciclo.get("fim_peso_g"):
+        return f"peso-alvo de {ciclo['fim_peso_g']:.0f} g".replace(".", ",")
+    return f"{int(ciclo.get('fim_idade') or 42)} dias"
+
+
+def progresso_fim(ciclo: dict, dia_actual: int, peso_actual_g: float) -> dict:
+    """Quanto falta para o fim do ciclo. Devolve valor, unidade, nota e se já
+    foi atingido."""
+    if ciclo.get("fim_tipo") == "peso" and ciclo.get("fim_peso_g"):
+        alvo = float(ciclo["fim_peso_g"])
+        if not peso_actual_g:
+            return {"valor": None, "unidade": "g", "atingido": False,
+                    "nota": f"peso-alvo {alvo:.0f} g · ainda sem pesagens"}
+        falta = alvo - peso_actual_g
+        return {"valor": max(0.0, falta), "unidade": "g", "atingido": falta <= 0,
+                "nota": f"para o peso-alvo de {alvo:.0f} g"}
+    idade = int(ciclo.get("fim_idade") or 42)
+    falta = idade - int(dia_actual)
+    return {"valor": max(0, falta), "unidade": "dias", "atingido": falta <= 0,
+            "nota": f"abate previsto aos {idade} dias"}
