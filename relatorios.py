@@ -241,13 +241,39 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
                 pdf.cell(w, 6, v, border=1)
             pdf.ln()
 
+    # Doenças e anomalias
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT data, dia_ciclo, tipo, sinais, suspeita, n_aves, accao FROM ocorrencias
+            WHERE ciclo_id = %s ORDER BY data
+        """, (ciclo_id,))
+        ocs = cur.fetchall()
+    if ocs:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "7. Doencas e anomalias observadas", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        for o in ocs:
+            d = o["data"]
+            d = f"{d[8:10]}/{d[5:7]}/{d[0:4]}" if len(d) >= 10 else d
+            linha = f"{d} (dia {o['dia_ciclo']}) - {o['tipo']}: {o['sinais']}"
+            if o["suspeita"]:
+                linha += f". Suspeita: {o['suspeita']}"
+            if o["n_aves"]:
+                linha += f". Aves afectadas: {o['n_aves']}"
+            if o["accao"]:
+                linha += f". Accao: {o['accao']}"
+            pdf.multi_cell(0, 5, _sanitizar(linha), new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1)
+
     # Observações
     if ciclo.get("observacoes"):
         pdf.ln(5)
         pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 7, "7. Observacoes", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, "8. Observacoes", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 6, ciclo["observacoes"])
+        pdf.multi_cell(0, 6, _sanitizar(ciclo["observacoes"]))
 
     # Guardar
     nome_fich = f"ciclo_{ciclo['codigo']}_{datetime.now():%Y%m%d_%H%M}.pdf"

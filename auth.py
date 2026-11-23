@@ -23,8 +23,16 @@ def _hash_pw(password: str, salt: str) -> str:
     return dk.hex()
 
 
+PAPEIS = {
+    "tratador": "Tratador",
+    "tecnico": "Técnico",
+    "chefe": "Chefe",
+    "administrador": "Administrador",
+}
+
+
 def registar_utilizador(username: str, nome_completo: str, password: str,
-                         papel: str = "operador") -> bool:
+                         papel: str = "tecnico") -> bool:
     salt = secrets.token_hex(16)
     pw_hash = _hash_pw(password, salt)
 
@@ -61,7 +69,8 @@ def validar_credenciais(username: str, password: str) -> dict | None:
             "id": row["id"],
             "username": row["username"],
             "nome_completo": row["nome_completo"],
-            "papel": row["papel"],
+            # contas antigas com 'operador' passam a técnico
+            "papel": "tecnico" if row["papel"] == "operador" else row["papel"],
         }
     return None
 

@@ -144,3 +144,40 @@ ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS cv_pct REAL;
 ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS pesos_individuais TEXT;
 ALTER TABLE vendas ADD COLUMN IF NOT EXISTS destino TEXT;
 ALTER TABLE parametros_referencia ADD COLUMN IF NOT EXISTS fonte TEXT;
+
+-- ------------------------------------------------------------------
+-- Versão 6: stock de insumos, doenças e anomalias, custos sanitários,
+-- perfis (tratador, técnico, chefe, administrador)
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS stock_movimentos (
+    id SERIAL PRIMARY KEY,
+    ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    tipo TEXT NOT NULL,            -- entrada (compra) ou saida (uso)
+    categoria TEXT NOT NULL,
+    item TEXT NOT NULL,
+    quantidade REAL NOT NULL,
+    unidade TEXT NOT NULL,
+    preco_total REAL,
+    custo_id INTEGER,
+    origem TEXT,
+    observacoes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ocorrencias (
+    id SERIAL PRIMARY KEY,
+    ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    dia_ciclo INTEGER NOT NULL,
+    tipo TEXT NOT NULL,
+    sinais TEXT NOT NULL,
+    suspeita TEXT,
+    n_aves INTEGER,
+    accao TEXT,
+    observacoes TEXT
+);
+
+ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_mzn REAL;
+ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_id INTEGER;
+UPDATE utilizadores SET papel = 'tecnico' WHERE papel = 'operador';
+INSERT INTO configuracoes (chave, valor) VALUES ('stock_min_pct', '20') ON CONFLICT DO NOTHING;

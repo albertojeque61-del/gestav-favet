@@ -1,7 +1,7 @@
 """
 Linhagens de referência: valores esperados por idade (peso, ICA e
 mortalidade acumulada) usados para comparar cada ciclo com a sua linhagem.
-O administrador pode acrescentar linhagens novas, corrigir valores e
+O chefe ou o administrador podem acrescentar linhagens novas, corrigir valores e
 definir o critério de uniformidade para o alerta de abate.
 """
 
@@ -10,6 +10,8 @@ import io
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+import perfis
 
 import estilo as ui
 from estilo import P
@@ -82,7 +84,7 @@ def pagina_linhagens():
         "o ICA e a mortalidade de cada ciclo com a linhagem certa.",
         "Administração",
     )
-    admin = st.session_state.user["papel"] == "administrador"
+    admin = perfis.edita_linhagens()
     linhagens = listar_linhagens()
 
     # ---------------- Consultar ----------------
@@ -126,7 +128,7 @@ def pagina_linhagens():
         escolha, tabela, n_ciclos, fonte = None, pd.DataFrame(), 0, ""
 
     if not admin:
-        st.info("Só o administrador pode acrescentar ou corrigir linhagens.")
+        st.info("Só o chefe ou o administrador podem acrescentar ou corrigir linhagens.")
         return
 
     # ---------------- Corrigir ----------------

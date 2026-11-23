@@ -191,11 +191,48 @@ def inicializar_bd():
             ALTER TABLE pesagens ADD COLUMN IF NOT EXISTS pesos_individuais TEXT;
             ALTER TABLE vendas ADD COLUMN IF NOT EXISTS destino TEXT;
             ALTER TABLE parametros_referencia ADD COLUMN IF NOT EXISTS fonte TEXT;
+
+            -- Stock de insumos de cada lote (entradas = compras, saídas = usos)
+            CREATE TABLE IF NOT EXISTS stock_movimentos (
+                id SERIAL PRIMARY KEY,
+                ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+                data TEXT NOT NULL,
+                tipo TEXT NOT NULL,              -- 'entrada' ou 'saida'
+                categoria TEXT NOT NULL,
+                item TEXT NOT NULL,
+                quantidade REAL NOT NULL,
+                unidade TEXT NOT NULL,
+                preco_total REAL,
+                custo_id INTEGER,
+                origem TEXT,                     -- 'compra', 'uso', 'sanitario'
+                observacoes TEXT
+            );
+
+            -- Doenças e anomalias observadas no lote
+            CREATE TABLE IF NOT EXISTS ocorrencias (
+                id SERIAL PRIMARY KEY,
+                ciclo_id INTEGER NOT NULL REFERENCES ciclos(id) ON DELETE CASCADE,
+                data TEXT NOT NULL,
+                dia_ciclo INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                sinais TEXT NOT NULL,
+                suspeita TEXT,
+                n_aves INTEGER,
+                accao TEXT,
+                observacoes TEXT
+            );
+
+            ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_mzn REAL;
+            ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_id INTEGER;
+
+            -- Perfis: o antigo 'operador' passa a 'tecnico'
+            UPDATE utilizadores SET papel = 'tecnico' WHERE papel = 'operador';
             """)
             _popular_parametros_ross308(cur)
             _popular_parametros_cobb500(cur)
             cur.execute("""
-                INSERT INTO configuracoes (chave, valor) VALUES ('uniformidade_min', '80')
+                INSERT INTO configuracoes (chave, valor) VALUES
+                    ('uniformidade_min', '80'), ('stock_min_pct', '20')
                 ON CONFLICT (chave) DO NOTHING
             """)
         conn.commit()

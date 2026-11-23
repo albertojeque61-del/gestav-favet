@@ -215,6 +215,8 @@ def gravar_dias(cid: int, linhas: list[dict], area: float, n_beb: int, n_com: in
     abate = avaliar_abate(cid, str(ultimo_dia))
     guardar_alertas(cid, str(ultimo_dia), abate)
     gerados += [{**a, "data": _data_pt(ultimo_dia)} for a in abate]
+    from stock import verificar_stock
+    gerados += [{**a, "data": _data_pt(ultimo_dia)} for a in verificar_stock(cid, str(ultimo_dia))]
     return len(novos), gerados
 
 
