@@ -33,6 +33,7 @@ def gerar_template_excel() -> bytes:
         "n_aves_alojadas": 1000,
         "linhagem": "Ross 308",
         "sexo": "Misto",
+        "peso_pinto_g": 40,
         "observacoes": "Ciclo de exemplo importado via Excel",
     }])
 
@@ -91,6 +92,8 @@ def gerar_template_excel() -> bytes:
             "n_aves": 950,
             "peso_total_kg": 2375.0,
             "preco_por_kg": 380.0,
+            "tipo_peso": "vivo",
+            "destino": "Outro",
             "cliente": "Mercado da Malanga",
         },
     ])
@@ -187,6 +190,10 @@ def importar_para_bd(abas: dict, utilizador_id: int) -> dict:
     linhagem = str(linha_ciclo["linhagem"]).strip()
     sexo = str(linha_ciclo["sexo"]).strip()
     observacoes = str(linha_ciclo.get("observacoes", "") or "")
+    if observacoes.lower() == "nan":
+        observacoes = ""
+    peso_pinto = linha_ciclo.get("peso_pinto_g")
+    peso_pinto = float(peso_pinto) if peso_pinto is not None and pd.notna(peso_pinto) and float(peso_pinto) > 0 else None
 
     with conectar() as conn:
         with conn.cursor() as cur:
@@ -202,11 +209,11 @@ def importar_para_bd(abas: dict, utilizador_id: int) -> dict:
             cur.execute("""
                 INSERT INTO ciclos
                     (utilizador_id, codigo, data_inicio, n_aves_alojadas,
-                     linhagem, sexo, observacoes, estado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'encerrado')
+                     linhagem, sexo, observacoes, estado, peso_pinto_g)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'encerrado', %s)
                 RETURNING id
             """, (utilizador_id, codigo, data_inicio_str, n_aves,
-                  linhagem, sexo, observacoes))
+                  linhagem, sexo, observacoes, peso_pinto))
             ciclo_id = cur.fetchone()["id"]
         conn.commit()
 
@@ -308,19 +315,31 @@ def importar_para_bd(abas: dict, utilizador_id: int) -> dict:
                     cur.execute("""
                         INSERT INTO vendas
                             (ciclo_id, data, n_aves, peso_total_kg,
-                             preco_por_kg, cliente)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                             preco_por_kg, cliente, destino, tipo_peso)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         ciclo_id, data_str,
                         int(row["n_aves"]),
                         float(row["peso_total_kg"]),
                         float(row["preco_por_kg"]),
-                        str(row.get("cliente", "") or ""),
+                        _texto(row.get("cliente")),
+                        _texto(row.get("destino")),
+                        _tipo_peso(row.get("tipo_peso")),
                     ))
                     resumo["vendas"] += 1
             conn.commit()
 
     return resumo
+
+
+def _texto(v) -> str:
+    return "" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v).strip()
+
+
+def _tipo_peso(v) -> str:
+    """'carcaça' se a célula disser carcaça/abatida; senão 'vivo'."""
+    t = _texto(v).lower()
+    return "carcaça" if ("carc" in t or "abat" in t) else "vivo"
 
 
 # ----------------------------------------------------------------------
@@ -359,6 +378,7 @@ def pagina_importar():
 - `n_aves_alojadas`: número de pintos no início do ciclo
 - `linhagem`: Ross 308, Cobb 500, Hubbard ou Outra
 - `sexo`: Misto, Macho ou Fêmea
+- `peso_pinto_g`: opcional, peso médio do pinto ao alojamento (g)
 - `observacoes`: opcional
 
 **Aba `registo_diario` (opcional, uma linha por dia)**
@@ -377,7 +397,8 @@ def pagina_importar():
 
 **Aba `vendas` (opcional, uma linha por venda)**
 - `data`, `n_aves`, `peso_total_kg`, `preco_por_kg`: obrigatórias
-- `cliente`: opcional
+- `tipo_peso`: opcional, `vivo` ou `carcaça` (sem nada, conta como vivo)
+- `destino`, `cliente`: opcionais
 
 > O ciclo será importado como **encerrado**, para ficar disponível para
 > análise. Pode reactivá-lo em **Ver ciclos** se precisar de continuar

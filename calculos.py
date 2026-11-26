@@ -3,6 +3,7 @@ Camada de lógica: cálculo dos indicadores técnicos e económicos.
 """
 
 import statistics
+from datetime import date
 
 from database import conectar, obter_referencia
 
@@ -12,13 +13,17 @@ from database import conectar, obter_referencia
 # ----------------------------------------------------------------------
 
 def mortalidade_acumulada(ciclo_id: int) -> dict:
-    """Devolve mortalidade total e percentagem acumulada."""
+    """Mortalidade total e percentagem acumulada (sobre as aves alojadas).
+
+    'aves_vivas' são as aves que ainda estão no pavilhão:
+    alojadas - mortas - vendidas. As vendidas não contam como mortas,
+    mas também já não estão no lote."""
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute("SELECT n_aves_alojadas FROM ciclos WHERE id = %s", (ciclo_id,))
         row = cur.fetchone()
         if row is None:
-            return {"total": 0, "pct": 0.0, "aves_vivas": 0}
+            return {"total": 0, "pct": 0.0, "aves_vivas": 0, "aves_vendidas": 0}
         n_alojadas = row["n_aves_alojadas"]
 
         cur.execute("""
@@ -26,12 +31,16 @@ def mortalidade_acumulada(ciclo_id: int) -> dict:
             FROM registo_diario WHERE ciclo_id = %s
         """, (ciclo_id,))
         total = cur.fetchone()["total"]
+        cur.execute("SELECT COALESCE(SUM(n_aves), 0) AS v FROM vendas WHERE ciclo_id = %s",
+                    (ciclo_id,))
+        vendidas = cur.fetchone()["v"]
 
     pct = (total / n_alojadas * 100) if n_alojadas else 0.0
     return {
         "total": int(total),
         "pct": round(pct, 2),
-        "aves_vivas": int(n_alojadas - total),
+        "aves_vendidas": int(vendidas),
+        "aves_vivas": max(0, int(n_alojadas - total - vendidas)),
     }
 
 
@@ -45,33 +54,108 @@ def consumo_total_racao(ciclo_id: int) -> float:
         return float(cur.fetchone()["total"])
 
 
-def peso_vivo_total(ciclo_id: int) -> float:
-    """Devolve o peso vivo total actual (kg), usando a pesagem mais recente
-    e as aves vivas."""
+RENDIMENTO_CARCACA = 0.72   # rendimento típico de carcaça; só se não houver pesagens
+
+
+def _ultima_pesagem(ciclo_id: int, ate: str = None, janela_dias: int = None):
+    """Peso médio (g) da pesagem mais recente. Com 'ate', só conta pesagens
+    até essa data e, com 'janela_dias', só as feitas nesses últimos dias
+    (para não estimar o peso de abate com uma pesagem de semanas antes)."""
     with conectar() as conn:
         cur = conn.cursor()
+        if ate:
+            cur.execute("""
+                SELECT peso_medio_g, data FROM pesagens
+                WHERE ciclo_id = %s AND data <= %s
+                ORDER BY data DESC, id DESC LIMIT 1
+            """, (ciclo_id, ate))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            if janela_dias is not None:
+                try:
+                    dias = (date.fromisoformat(str(ate)[:10])
+                            - date.fromisoformat(str(row["data"])[:10])).days
+                except ValueError:
+                    dias = 0
+                if dias > janela_dias:
+                    return None
+            return float(row["peso_medio_g"])
         cur.execute("""
             SELECT peso_medio_g FROM pesagens
             WHERE ciclo_id = %s
             ORDER BY dia_ciclo DESC, id DESC LIMIT 1
         """, (ciclo_id,))
         row = cur.fetchone()
+    return float(row["peso_medio_g"]) if row else None
 
-    if row is None:
+
+def peso_vivo_pavilhao(ciclo_id: int) -> float:
+    """Peso vivo (kg) das aves que ainda estão no pavilhão."""
+    peso_g = _ultima_pesagem(ciclo_id)
+    if peso_g is None:
         return 0.0
+    aves = mortalidade_acumulada(ciclo_id)["aves_vivas"]
+    return round(aves * peso_g / 1000.0, 2)
 
-    aves_vivas = mortalidade_acumulada(ciclo_id)["aves_vivas"]
-    peso_medio_kg = row["peso_medio_g"] / 1000.0
-    return round(aves_vivas * peso_medio_kg, 2)
+
+def peso_vivo_vendido(ciclo_id: int) -> float:
+    """Peso vivo (kg) das aves já vendidas. Nas vendas a peso vivo usa o peso
+    da balança. Nas vendas em carcaça estima o peso vivo com a pesagem feita
+    até 7 dias antes da venda (n.º de aves × peso médio); sem essa pesagem,
+    divide o peso da carcaça pelo rendimento típico."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT data, n_aves, peso_total_kg, COALESCE(tipo_peso, 'vivo') AS tipo_peso
+            FROM vendas WHERE ciclo_id = %s
+        """, (ciclo_id,))
+        vendas = cur.fetchall()
+    total = 0.0
+    for v in vendas:
+        if v["tipo_peso"] == "carcaça":
+            peso_g = _ultima_pesagem(ciclo_id, v["data"], janela_dias=7)
+            if peso_g:
+                total += v["n_aves"] * peso_g / 1000.0
+            else:
+                total += (v["peso_total_kg"] or 0) / RENDIMENTO_CARCACA
+        else:
+            total += v["peso_total_kg"] or 0
+    return round(total, 2)
+
+
+def peso_vivo_total(ciclo_id: int) -> float:
+    """Peso vivo produzido no ciclo (kg): aves no pavilhão + aves vendidas.
+    É a base da conversão alimentar e do custo por kg."""
+    return round(peso_vivo_pavilhao(ciclo_id) + peso_vivo_vendido(ciclo_id), 2)
 
 
 def conversao_alimentar(ciclo_id: int) -> float:
-    """ICA = consumo total de ração / peso vivo total actual."""
+    """CA = consumo total de ração / peso vivo produzido (Aviagen, 2018)."""
     peso = peso_vivo_total(ciclo_id)
     if peso == 0:
         return 0.0
     consumo = consumo_total_racao(ciclo_id)
     return round(consumo / peso, 3)
+
+
+def peso_inicial_pinto(ciclo_id: int) -> tuple[float, str]:
+    """Peso do pinto ao alojamento: o valor registado no ciclo, senão a
+    pesagem do dia 0, senão 42 g (valor típico de um pinto de 1 dia)."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT peso_pinto_g FROM ciclos WHERE id = %s", (ciclo_id,))
+        row = cur.fetchone()
+        if row and row["peso_pinto_g"]:
+            return float(row["peso_pinto_g"]), "registado"
+        cur.execute("""
+            SELECT peso_medio_g FROM pesagens
+            WHERE ciclo_id = %s AND dia_ciclo = 0 ORDER BY id DESC LIMIT 1
+        """, (ciclo_id,))
+        row = cur.fetchone()
+    if row and row["peso_medio_g"]:
+        return float(row["peso_medio_g"]), "pesagem do dia 0"
+    return 42.0, "valor padrão"
 
 
 def ganho_medio_diario(ciclo_id: int) -> dict:
@@ -88,8 +172,7 @@ def ganho_medio_diario(ciclo_id: int) -> dict:
     if row is None or row["dia_ciclo"] == 0:
         return {"gmd": 0.0, "peso_actual_g": 0, "dia": 0}
 
-    # Peso inicial padrão: 42g (pinto de 1 dia)
-    peso_inicial = 42.0
+    peso_inicial, _ = peso_inicial_pinto(ciclo_id)
     gmd = (row["peso_medio_g"] - peso_inicial) / row["dia_ciclo"]
     return {
         "gmd": round(gmd, 2),
@@ -160,11 +243,13 @@ def receitas_totais(ciclo_id: int) -> dict:
             SELECT
                 COALESCE(SUM(peso_total_kg * preco_por_kg), 0) AS receita,
                 COALESCE(SUM(peso_total_kg), 0) AS kg,
-                COALESCE(SUM(n_aves), 0) AS aves
+                COALESCE(SUM(n_aves), 0) AS aves,
+                COALESCE(SUM(CASE WHEN tipo_peso = 'carcaça' THEN peso_total_kg END), 0) AS kg_carcaca
             FROM vendas WHERE ciclo_id = %s
         """, (ciclo_id,))
         row = cur.fetchone()
     return {
+        "kg_carcaca": round(row["kg_carcaca"], 2),
         "receita": round(row["receita"], 2),
         "kg_vendidos": round(row["kg"], 2),
         "aves_vendidas": int(row["aves"]),
@@ -172,14 +257,19 @@ def receitas_totais(ciclo_id: int) -> dict:
 
 
 def custo_por_kg(ciclo_id: int) -> float:
-    """Custo por kg produzido. Usa kg vendidos se houver vendas, caso
-    contrário o peso vivo total actual."""
+    """Custo por kg de peso vivo produzido (aves no pavilhão + vendidas)."""
     c = custos_totais(ciclo_id)["total"]
-    r = receitas_totais(ciclo_id)
-    kg = r["kg_vendidos"] if r["kg_vendidos"] > 0 else peso_vivo_total(ciclo_id)
+    kg = peso_vivo_total(ciclo_id)
     if kg == 0:
         return 0.0
     return round(c / kg, 2)
+
+
+def custo_por_kg_vendido(ciclo_id: int) -> float:
+    """Custo por kg vendido, na unidade em que se vendeu (vivo ou carcaça)."""
+    c = custos_totais(ciclo_id)["total"]
+    kg = receitas_totais(ciclo_id)["kg_vendidos"]
+    return round(c / kg, 2) if kg else 0.0
 
 
 def custo_por_ave(ciclo_id: int) -> float:
@@ -223,6 +313,7 @@ def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
         else:
             return {"kg": 0.0, "aves": 0, "preco_usado": 0.0}
 
+    # Tudo na mesma unidade: kg vendidos (vivo ou carcaça, como na venda)
     kg_prod = r["kg_vendidos"] if r["kg_vendidos"] > 0 else peso_vivo_total(ciclo_id)
     custo_variavel_kg = c["variavel"] / kg_prod if kg_prod else 0.0
     margem_contrib = preco_kg_assumido - custo_variavel_kg
@@ -235,7 +326,8 @@ def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
         cur = conn.cursor()
         cur.execute("SELECT n_aves_alojadas FROM ciclos WHERE id = %s", (ciclo_id,))
         row = cur.fetchone()
-    peso_medio = (kg_prod / row["n_aves_alojadas"]) if row and row["n_aves_alojadas"] else 1.5
+    aves_base = r["aves_vendidas"] or (row["n_aves_alojadas"] if row else 0)
+    peso_medio = (kg_prod / aves_base) if aves_base else 1.5
     aves_pe = int(kg_pe / peso_medio) if peso_medio else 0
 
     return {
@@ -321,6 +413,7 @@ def resumo_ciclo(ciclo_id: int) -> dict:
 
     return {
         "aves_vivas": mort["aves_vivas"],
+        "aves_vendidas": mort["aves_vendidas"],
         "mortalidade_total": mort["total"],
         "mortalidade_pct": mort["pct"],
         "viabilidade_pct": viabilidade(ciclo_id),
@@ -331,6 +424,9 @@ def resumo_ciclo(ciclo_id: int) -> dict:
         "ica": conversao_alimentar(ciclo_id),
         "iep": iep(ciclo_id),
         "peso_vivo_total_kg": peso_vivo_total(ciclo_id),
+        "peso_vivo_pavilhao_kg": peso_vivo_pavilhao(ciclo_id),
+        "peso_pinto_g": peso_inicial_pinto(ciclo_id)[0],
+        "peso_pinto_origem": peso_inicial_pinto(ciclo_id)[1],
         "custo_total": c["total"],
         "custo_variavel": c["variavel"],
         "custo_fixo": c["fixo"],
@@ -338,6 +434,8 @@ def resumo_ciclo(ciclo_id: int) -> dict:
         "custo_por_ave": custo_por_ave(ciclo_id),
         "receita": r["receita"],
         "kg_vendidos": r["kg_vendidos"],
+        "kg_carcaca": r["kg_carcaca"],
+        "custo_por_kg_vendido": custo_por_kg_vendido(ciclo_id),
         "margem_bruta": m["margem_bruta"],
         "margem_liquida": m["margem_liquida"],
         "margem_bruta_pct": m["margem_bruta_pct"],

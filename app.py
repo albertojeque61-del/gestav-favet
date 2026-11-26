@@ -292,7 +292,7 @@ def modulo_inicio():
         nota = f"{n_al} alerta(s) aberto(s)" if n_al else "sem alertas abertos"
         cartoes.append(ui.kpi_html(
             f"Ciclo {c['codigo']} · dia {_dia_ciclo(c, r)}",
-            num(r["aves_vivas"]), "aves vivas",
+            num(r["aves_vivas"]), "aves no pavilhão",
             f"Mortalidade {num(r['mortalidade_pct'], 1)}% · peso {num(r['peso_actual_g'])} g · {nota}",
             "ovo", estado,
         ))
@@ -361,12 +361,16 @@ def modulo_dashboard():
         extra.append(unif)
     ui.grelha(extra + [
         ui.kpi_html("Dia do ciclo", str(dia), "dias", f"início em {ui.data_curta(ciclo['data_inicio'])}", "calendario", "neutro"),
-        ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", f"de {num(ciclo['n_aves_alojadas'])} alojadas", "ovo", "verde"),
+        ui.kpi_html("Aves no pavilhão", num(r["aves_vivas"]), "",
+                    f"de {num(ciclo['n_aves_alojadas'])} alojadas"
+                    + (f" · {num(r['aves_vendidas'])} vendidas" if r["aves_vendidas"] else ""),
+                    "ovo", "verde"),
         ui.kpi_html("Peso médio", num(r["peso_actual_g"]), "g", "última pesagem", "peso", "verde"),
-        ui.kpi_html("Ganho médio diário", num(r["gmd"], 1), "g/dia", "", "subida", "verde"),
+        ui.kpi_html("Ganho médio diário", num(r["gmd"], 1), "g/dia",
+                    f"pinto: {num(r['peso_pinto_g'])} g ({r['peso_pinto_origem']})", "subida", "verde"),
         ui.kpi_html("Mortalidade", num(r["mortalidade_pct"], 1), "%", f"{num(r['mortalidade_total'])} aves", "pulso", tom_mort),
         ui.kpi_html("Viabilidade", num(r["viabilidade_pct"], 1), "%", "", "escudo", "verde"),
-        ui.kpi_html("Conversão alimentar", num(r["ica"], 2), "", "kg ração por kg de peso", "ciclo", "ouro"),
+        ui.kpi_html("Conversão alimentar", num(r["ica"], 2), "", "kg ração por kg de peso vivo", "ciclo", "ouro"),
         ui.kpi_html("Índice de eficiência", num(r["iep"]), "", "IEP", "medalha", "ouro"),
     ])
 
@@ -503,6 +507,10 @@ def modulo_novo_ciclo():
             codigo = st.text_input("Código do ciclo", value=f"C{datetime.now():%Y%m}")
             data_inicio = st.date_input("Data de alojamento", value=date.today(), format="DD/MM/YYYY")
             n_aves = st.number_input("Nº de aves alojadas", min_value=1, value=1000, step=100)
+            peso_pinto = st.number_input(
+                "Peso médio do pinto ao alojamento (g)", min_value=0.0, value=0.0, step=1.0,
+                help="Pese uma amostra de pintos à chegada. Deixe 0 se não pesou: o sistema "
+                     "usa a pesagem do dia 0 ou, sem ela, 42 g.")
         with col2:
             sem_ref = "Outra (sem referência)"
             linhagens = listar_linhagens()
@@ -529,10 +537,11 @@ def modulo_novo_ciclo():
                         INSERT INTO ciclos
                             (utilizador_id, codigo, data_inicio, n_aves_alojadas,
                              linhagem, sexo, observacoes, estado,
-                             fim_tipo, fim_idade, fim_peso_g)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'activo', %s, %s, %s)
+                             fim_tipo, fim_idade, fim_peso_g, peso_pinto_g)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'activo', %s, %s, %s, %s)
                     """, (st.session_state.user["id"], codigo.strip(), str(data_inicio),
-                          n_aves, linhagem, sexo, observacoes, fim_tipo, fim_idade, fim_peso))
+                          n_aves, linhagem, sexo, observacoes, fim_tipo, fim_idade, fim_peso,
+                          peso_pinto or None))
                     conn.commit()
                 fim_txt = descrever_fim({"fim_tipo": fim_tipo, "fim_idade": fim_idade, "fim_peso_g": fim_peso})
                 st.success(f"Ciclo **{codigo}** criado, com fim previsto por {fim_txt}. "
@@ -606,6 +615,22 @@ def modulo_ver_ciclos():
                     (fim_tipo, fim_idade, fim_peso, cid))
                 conn.commit()
             st.success("Fim do ciclo actualizado.")
+            st.rerun()
+
+        ui.secao("Peso do pinto ao alojamento", "usado no ganho médio diário")
+        with conectar() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT peso_pinto_g FROM ciclos WHERE id = %s", (cid,))
+            pp_actual = cur.fetchone()["peso_pinto_g"] or 0.0
+        pp = st.number_input("Peso médio do pinto (g)", min_value=0.0, value=float(pp_actual), step=1.0,
+                             key=f"pp_{cid}",
+                             help="Deixe 0 se não pesou: o sistema usa a pesagem do dia 0 ou, sem ela, 42 g.")
+        if st.button("Guardar o peso do pinto", icon=":material/scale:"):
+            with conectar() as conn:
+                conn.cursor().execute("UPDATE ciclos SET peso_pinto_g=%s WHERE id = %s",
+                                      (pp or None, cid))
+                conn.commit()
+            st.success("Peso do pinto actualizado.")
             st.rerun()
 
 
@@ -920,6 +945,9 @@ def modulo_vendas():
             n_aves = st.number_input("Nº de aves vendidas", min_value=1, value=100)
             destino = st.selectbox("Destino", DESTINOS)
         with col2:
+            tipo_txt = st.radio("O peso é de", ["Ave viva", "Carcaça (ave abatida)"], horizontal=True,
+                                help="Diga se o peso da venda é das aves vivas ou já abatidas. "
+                                     "Na carcaça, o sistema estima o peso vivo com a última pesagem.")
             peso_total = st.number_input("Peso total (kg)", min_value=0.0, value=0.0, step=0.5)
             preco_kg = st.number_input("Preço por kg (MZN)", min_value=0.0, value=380.0, step=5.0)
             cliente = st.text_input("Cliente ou nota (opcional)")
@@ -928,9 +956,10 @@ def modulo_vendas():
             with conectar() as conn:
                 conn.cursor().execute("""
                     INSERT INTO vendas (ciclo_id, data, n_aves, peso_total_kg, preco_por_kg,
-                                        cliente, destino)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (cid, str(data_v), n_aves, peso_total, preco_kg, cliente, destino))
+                                        cliente, destino, tipo_peso)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (cid, str(data_v), n_aves, peso_total, preco_kg, cliente, destino,
+                      "carcaça" if tipo_txt.startswith("Carcaça") else "vivo"))
                 conn.commit()
             st.success(f"Venda de **{num(peso_total, 1)} kg** por **{mzn(peso_total * preco_kg, 2)}** registada.")
 
@@ -938,14 +967,16 @@ def modulo_vendas():
     ui.secao("Resumo de vendas")
     ui.grelha([
         ui.kpi_html("Receita total", num(r["receita"]), "MZN", "", "nota", "verde"),
-        ui.kpi_html("Quilos vendidos", num(r["kg_vendidos"], 1), "kg", "", "peso", "ouro"),
+        ui.kpi_html("Quilos vendidos", num(r["kg_vendidos"], 1), "kg",
+                    f"dos quais {num(r['kg_carcaca'], 1)} kg em carcaça" if r["kg_carcaca"] else "peso vivo",
+                    "peso", "ouro"),
         ui.kpi_html("Aves vendidas", num(r["aves_vendidas"]), "", "", "ovo", "neutro"),
     ])
 
     with conectar() as conn:
         df = ler_df("""
-            SELECT data, n_aves, peso_total_kg, preco_por_kg,
-                   (peso_total_kg * preco_por_kg) AS total_mzn, destino, cliente
+            SELECT data, n_aves, peso_total_kg, COALESCE(tipo_peso, 'vivo') AS tipo_peso,
+                   preco_por_kg, (peso_total_kg * preco_por_kg) AS total_mzn, destino, cliente
             FROM vendas WHERE ciclo_id = %s
             ORDER BY data DESC
         """, conn, params=(cid,))
@@ -970,6 +1001,7 @@ def modulo_vendas():
         st.dataframe(df, width="stretch", hide_index=True, column_config={
             "data": "Data", "n_aves": "Aves",
             "peso_total_kg": st.column_config.NumberColumn("Peso (kg)", format="%.1f"),
+            "tipo_peso": "Peso de",
             "preco_por_kg": st.column_config.NumberColumn("Preço/kg (MZN)", format="%.2f"),
             "total_mzn": st.column_config.NumberColumn("Total (MZN)", format="%.2f"),
             "destino": "Destino", "cliente": "Cliente ou nota",
@@ -992,11 +1024,13 @@ def modulo_indicadores():
     extra = [c for c in [_cartao_fim(ciclo, r, dia), _cartao_uniformidade(r)] if c]
     ui.grelha(extra + [
         ui.kpi_html("Dia do ciclo", str(dia), "dias", "", "calendario", "neutro"),
-        ui.kpi_html("Aves vivas", num(r["aves_vivas"]), "", "", "ovo", "verde"),
+        ui.kpi_html("Aves no pavilhão", num(r["aves_vivas"]), "",
+                    f"{num(r['aves_vendidas'])} vendidas" if r["aves_vendidas"] else "", "ovo", "verde"),
         ui.kpi_html("Mortalidade", num(r["mortalidade_pct"], 1), "%", "", "pulso", "verm" if r["mortalidade_pct"] > 8 else "verde"),
         ui.kpi_html("Viabilidade", num(r["viabilidade_pct"], 1), "%", "", "escudo", "verde"),
         ui.kpi_html("Peso médio", num(r["peso_actual_g"]), "g", "", "peso", "verde"),
-        ui.kpi_html("GMD", num(r["gmd"], 1), "g/dia", "", "subida", "verde"),
+        ui.kpi_html("GMD", num(r["gmd"], 1), "g/dia", f"pinto: {num(r['peso_pinto_g'])} g", "subida", "verde"),
+        ui.kpi_html("Peso vivo produzido", num(r["peso_vivo_total_kg"]), "kg", "no pavilhão + vendido", "peso", "verde"),
         ui.kpi_html("Consumo de ração", num(r["consumo_racao_kg"]), "kg", "", "racao", "ouro"),
         ui.kpi_html("ICA", num(r["ica"], 2), "", "", "ciclo", "ouro"),
         ui.kpi_html("IEP", num(r["iep"]), "", "", "medalha", "ouro"),
@@ -1009,12 +1043,17 @@ def modulo_indicadores():
             ui.kpi_html("Custo total", num(r["custo_total"]), "MZN", "", "carteira", "ouro"),
             ui.kpi_html("Custo variável", num(r["custo_variavel"]), "MZN", "", "racao", "neutro"),
             ui.kpi_html("Custo fixo", num(r["custo_fixo"]), "MZN", "", "camada", "neutro"),
-            ui.kpi_html("Custo por kg", num(r["custo_por_kg"], 2), "MZN", "", "peso", "ouro"),
+            ui.kpi_html("Custo por kg", num(r["custo_por_kg"], 2), "MZN", "por kg de peso vivo", "peso", "ouro"),
+            ui.kpi_html("Custo por kg vendido", num(r["custo_por_kg_vendido"], 2), "MZN",
+                        "na unidade da venda (vivo ou carcaça)", "nota", "neutro"),
             ui.kpi_html("Custo por ave", num(r["custo_por_ave"], 2), "MZN", "", "ovo", "ouro"),
             ui.kpi_html("Receita", num(r["receita"]), "MZN", "", "nota", "verde"),
         ] + _cartoes_margem(r) + [
             _cartao_roi(r),
-            ui.kpi_html("Ponto de equilíbrio", num(pe), "kg", "quilos a vender para cobrir custos", "medalha", "azul"),
+            ui.kpi_html("Ponto de equilíbrio", num(pe), "kg",
+                        "quilos a vender para cobrir custos"
+                        + (" (em carcaça)" if r["kg_carcaca"] and r["kg_carcaca"] >= r["kg_vendidos"] else ""),
+                        "medalha", "azul"),
         ])
 
     ui.secao("Comparação com a referência", ciclo["linhagem"])

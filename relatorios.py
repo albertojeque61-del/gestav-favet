@@ -119,15 +119,16 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
     pdf.set_font("Helvetica", "", 10)
     tec = [
         ("Dia do ciclo", f"{r['dia_ciclo']}"),
-        ("Aves vivas", f"{r['aves_vivas']:,}".replace(",", ".")),
+        ("Aves no pavilhao", f"{r['aves_vivas']:,}".replace(",", ".")),
+        ("Aves vendidas", f"{r.get('aves_vendidas', 0):,}".replace(",", ".")),
         ("Mortalidade total / %", f"{r['mortalidade_total']}  ({r['mortalidade_pct']}%)"),
         ("Viabilidade", f"{r['viabilidade_pct']}%"),
         ("Peso medio actual", f"{r['peso_actual_g']} g"),
-        ("Ganho medio diario (GMD)", f"{r['gmd']} g/dia"),
+        ("Ganho medio diario (GMD)", f"{r['gmd']} g/dia  (pinto: {r.get('peso_pinto_g', 42):.0f} g)"),
         ("Consumo acumulado de racao", f"{r['consumo_racao_kg']} kg"),
         ("Conversao alimentar (ICA)", f"{r['ica']}"),
         ("Indice de Eficiencia Produtiva (IEP)", f"{r['iep']}"),
-        ("Peso vivo total actual", f"{r['peso_vivo_total_kg']} kg"),
+        ("Peso vivo produzido", f"{r['peso_vivo_total_kg']} kg  (no pavilhao + vendido)"),
     ]
     if r.get("uniformidade_pct") is not None:
         tec.append(("Uniformidade (ultima pesagem)", f"{r['uniformidade_pct']}%"
@@ -167,15 +168,17 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
         ("Custos totais", _formatar_mzn(r['custo_total'])),
         ("  Custos variaveis", _formatar_mzn(r['custo_variavel'])),
         ("  Custos fixos", _formatar_mzn(r['custo_fixo'])),
-        ("Custo por kg produzido", _formatar_mzn(r['custo_por_kg'])),
+        ("Custo por kg de peso vivo", _formatar_mzn(r['custo_por_kg'])),
+        ("Custo por kg vendido", _formatar_mzn(r.get('custo_por_kg_vendido', 0))),
         ("Custo por ave", _formatar_mzn(r['custo_por_ave'])),
         ("Receita total", _formatar_mzn(r['receita'])),
-        ("Kg vendidos", f"{r['kg_vendidos']} kg"),
+        ("Kg vendidos", f"{r['kg_vendidos']} kg"
+         + (f"  (dos quais {r['kg_carcaca']} kg em carcaca)" if r.get('kg_carcaca') else "")),
         ("Margem bruta", f"{_formatar_mzn(r['margem_bruta'])}  ({r['margem_bruta_pct']}%)"),
         ("Margem liquida", f"{_formatar_mzn(r['margem_liquida'])}  ({r['margem_liquida_pct']}%)"),
         ("Retorno sobre o investimento",
          f"{r['roi_pct']}%" if r.get("roi_pct") is not None else "sem vendas registadas"),
-        ("Ponto de equilibrio (kg)", f"{r['ponto_equilibrio_kg']}"),
+        ("Ponto de equilibrio (kg vendidos)", f"{r['ponto_equilibrio_kg']}"),
     ]
     for k, v in econ:
         pdf.cell(80, 6, k)

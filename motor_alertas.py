@@ -13,20 +13,36 @@ def _v(valor, casas=1):
     return f"{valor:.{casas}f}".replace(".", ",")
 
 
+def _aves_no_pavilhao(cur, ciclo_id, data):
+    """Aves no pavilhão nessa data: alojadas - mortas - vendidas até ao dia."""
+    cur.execute("""
+        SELECT n_aves_alojadas,
+               COALESCE((SELECT SUM(mortalidade) FROM registo_diario
+                         WHERE ciclo_id = %s AND data <= %s), 0) AS mortes,
+               COALESCE((SELECT SUM(n_aves) FROM vendas
+                         WHERE ciclo_id = %s AND data <= %s), 0) AS vendidas
+        FROM ciclos WHERE id = %s
+    """, (ciclo_id, data, ciclo_id, data, ciclo_id))
+    row = cur.fetchone()
+    return max(0, row["n_aves_alojadas"] - row["mortes"] - row["vendidas"])
+
+
 # ---------------- Regras ----------------
 
 def _mortalidade_anormal(ciclo_id, reg):
-    """Mortalidade do dia superior a 0,5% das aves vivas."""
+    """Mortalidade do dia superior a 0,5% das aves no pavilhão."""
     with conectar() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT n_aves_alojadas,
                        COALESCE((SELECT SUM(mortalidade) FROM registo_diario
-                                 WHERE ciclo_id = %s AND data < %s), 0) AS mortes_antes
+                                 WHERE ciclo_id = %s AND data < %s), 0) AS mortes_antes,
+                       COALESCE((SELECT SUM(n_aves) FROM vendas
+                                 WHERE ciclo_id = %s AND data < %s), 0) AS vendidas_antes
                 FROM ciclos WHERE id = %s
-            """, (ciclo_id, reg["data"], ciclo_id))
+            """, (ciclo_id, reg["data"], ciclo_id, reg["data"], ciclo_id))
             row = cur.fetchone()
-    aves_vivas = row["n_aves_alojadas"] - row["mortes_antes"]
+    aves_vivas = row["n_aves_alojadas"] - row["mortes_antes"] - row["vendidas_antes"]
     if aves_vivas <= 0:
         return None
     pct_dia = (reg["mortalidade"] / aves_vivas) * 100
@@ -34,7 +50,7 @@ def _mortalidade_anormal(ciclo_id, reg):
         return {
             "nivel": "critico",
             "titulo": "Mortalidade anormal",
-            "mensagem": f"Morreram {reg['mortalidade']} aves hoje ({_v(pct_dia, 2)}% das aves vivas).",
+            "mensagem": f"Morreram {reg['mortalidade']} aves hoje ({_v(pct_dia, 2)}% das aves no pavilhão).",
             "recomendacao": "Investigar imediatamente a causa: avaliar sinais de doença, verificar temperatura, disponibilidade de água, estado da ração e densidade. Contactar médico veterinário se o padrão persistir no dia seguinte.",
         }
     return None
@@ -131,14 +147,7 @@ def _densidade_elevada(ciclo_id, reg):
         return None
     with conectar() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT n_aves_alojadas,
-                       COALESCE((SELECT SUM(mortalidade) FROM registo_diario
-                                 WHERE ciclo_id = %s), 0) AS mortes
-                FROM ciclos WHERE id = %s
-            """, (ciclo_id, ciclo_id))
-            row = cur.fetchone()
-    aves_vivas = row["n_aves_alojadas"] - row["mortes"]
+            aves_vivas = _aves_no_pavilhao(cur, ciclo_id, reg["data"])
     densidade = aves_vivas / area
     if densidade > 12:
         return {
@@ -157,14 +166,9 @@ def _bebedouros_insuficientes(ciclo_id, reg):
         return None
     with conectar() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT n_aves_alojadas,
-                       COALESCE((SELECT SUM(mortalidade) FROM registo_diario
-                                 WHERE ciclo_id = %s), 0) AS mortes
-                FROM ciclos WHERE id = %s
-            """, (ciclo_id, ciclo_id))
-            row = cur.fetchone()
-    aves_vivas = row["n_aves_alojadas"] - row["mortes"]
+            aves_vivas = _aves_no_pavilhao(cur, ciclo_id, reg["data"])
+    if aves_vivas <= 0:
+        return None
     # Rácio comum: 1 bebedouro nipple por 10-15 aves; 1 bebedouro linear por 80 aves
     if n_beb == 0 or aves_vivas / max(n_beb, 1) > 80:
         return {

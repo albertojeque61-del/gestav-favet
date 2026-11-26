@@ -227,6 +227,10 @@ def inicializar_bd():
 
             -- Perfis: o antigo 'operador' passa a 'tecnico'
             UPDATE utilizadores SET papel = 'tecnico' WHERE papel = 'operador';
+
+            -- v7: tipo de peso das vendas e peso do pinto ao alojamento
+            ALTER TABLE vendas ADD COLUMN IF NOT EXISTS tipo_peso TEXT NOT NULL DEFAULT 'vivo';
+            ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS peso_pinto_g REAL;
             """)
             _popular_parametros_ross308(cur)
             _popular_parametros_cobb500(cur)

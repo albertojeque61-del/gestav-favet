@@ -181,3 +181,7 @@ ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_mzn REAL;
 ALTER TABLE sanitario ADD COLUMN IF NOT EXISTS custo_id INTEGER;
 UPDATE utilizadores SET papel = 'tecnico' WHERE papel = 'operador';
 INSERT INTO configuracoes (chave, valor) VALUES ('stock_min_pct', '20') ON CONFLICT DO NOTHING;
+
+-- v7: tipo de peso das vendas (vivo ou carcaça) e peso do pinto ao alojamento
+ALTER TABLE vendas ADD COLUMN IF NOT EXISTS tipo_peso TEXT NOT NULL DEFAULT 'vivo';
+ALTER TABLE ciclos ADD COLUMN IF NOT EXISTS peso_pinto_g REAL;
