@@ -21,7 +21,7 @@ ACESSO = {
     "registo": TODOS, "semanal": TODOS, "pesagens": TODOS, "sanitario": TODOS, "stock": TODOS,
     "novo": TECNICOS, "ciclos": TECNICOS, "importar": GESTAO,
     "custos": GESTAO, "vendas": GESTAO,
-    "indicadores": TECNICOS, "sensibilidade": GESTAO, "relatorios": GESTAO,
+    "indicadores": TECNICOS, "comparar": TECNICOS, "sensibilidade": GESTAO, "relatorios": GESTAO,
     "linhagens": TECNICOS, "utilizadores": {"administrador"},
     "conta": TODOS,
 }

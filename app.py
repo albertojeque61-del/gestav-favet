@@ -31,6 +31,7 @@ from motor_alertas import (
 from importar import pagina_importar
 from semanal import pagina_registo_semanal
 from linhagens import pagina_linhagens
+from comparar import pagina_comparar
 from stock import pagina_stock, verificar_stock, registar_uso, CATEGORIA_CUSTO
 from auth import PAPEIS
 import perfis
@@ -1132,6 +1133,21 @@ def modulo_relatorios():
     if cid is None:
         return
 
+    with st.expander("Ver a nota técnica deste ciclo (falhas e o que melhorar)", icon=":material/fact_check:"):
+        from nota_tecnica import analisar_ciclo
+        with st.spinner("A analisar o ciclo..."):
+            nota = analisar_ciclo(cid)
+        if nota["pontos_fortes"]:
+            st.markdown("**O que correu bem**")
+            for p_ in nota["pontos_fortes"]:
+                st.markdown(f"- {p_}")
+        st.markdown("**Falhas e o que melhorar no próximo ciclo**")
+        if not nota["falhas"]:
+            st.success("Os registos deste ciclo não mostram falhas.")
+        for i, f_ in enumerate(nota["falhas"], 1):
+            st.markdown(f"**{i}. {f_['area']}.** {f_['falha']}  \n*A melhorar:* {f_['melhorar']}")
+        st.caption("A nota técnica também sai no fim do relatório em PDF.")
+
     if st.button("Gerar relatório em PDF", type="primary", icon=":material/picture_as_pdf:"):
         try:
             with st.spinner("A preparar o relatório, aguarde alguns segundos..."):
@@ -1485,6 +1501,7 @@ MODULOS = {
     "custos": modulo_custos,
     "vendas": modulo_vendas,
     "indicadores": modulo_indicadores,
+    "comparar": pagina_comparar,
     "sensibilidade": modulo_sensibilidade,
     "relatorios": modulo_relatorios,
     "linhagens": pagina_linhagens,
@@ -1523,6 +1540,7 @@ def _menu_lateral(user: dict):
         ]),
         ("Análise", [
             ("indicadores", "Indicadores", ":material/insights:"),
+            ("comparar", "Comparar ciclos", ":material/compare_arrows:"),
             ("sensibilidade", "Sensibilidade", ":material/tune:"),
             ("relatorios", "Relatórios PDF", ":material/picture_as_pdf:"),
         ]),

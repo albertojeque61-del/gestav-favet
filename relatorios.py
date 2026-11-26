@@ -10,6 +10,7 @@ from fpdf import FPDF
 from calculos import resumo_ciclo, semaforos, descrever_fim, leitura_unica
 from sensibilidade import tabela_cenarios
 from database import conectar
+from nota_tecnica import analisar_ciclo
 
 
 EXPORT_DIR = os.path.join(os.path.dirname(__file__), "exports")
@@ -283,6 +284,40 @@ def _gerar_relatorio_ciclo(ciclo_id: int) -> str:
         pdf.cell(0, 7, "8. Observacoes", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
         pdf.multi_cell(0, 6, _sanitizar(ciclo["observacoes"]))
+
+    # Nota técnica
+    nota = analisar_ciclo(ciclo_id)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "9. Nota tecnica do ciclo", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.multi_cell(0, 5, _sanitizar(
+        "Gerada pelo sistema a partir dos registos deste ciclo. Aponta o que correu bem, as "
+        "falhas que os dados mostram e o que melhorar no proximo lote. Deve ser lida pelo "
+        "responsavel tecnico, que pode acrescentar a sua apreciacao nas observacoes."),
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    if nota["pontos_fortes"]:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "O que correu bem", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        for p_ in nota["pontos_fortes"]:
+            pdf.multi_cell(0, 5.5, _sanitizar("- " + p_), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Falhas identificadas e o que melhorar no proximo ciclo",
+             new_x="LMARGIN", new_y="NEXT")
+    if not nota["falhas"]:
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5.5, _sanitizar("Os registos deste ciclo nao mostram falhas."),
+                       new_x="LMARGIN", new_y="NEXT")
+    for i, f_ in enumerate(nota["falhas"], 1):
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.multi_cell(0, 5.5, _sanitizar(f"{i}. {f_['area']}"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5.5, _sanitizar("Falha: " + f_["falha"]), new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 5.5, _sanitizar("A melhorar: " + f_["melhorar"]), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
 
     # Guardar
     codigo_seguro = re.sub(r"[^A-Za-z0-9_-]+", "-", str(ciclo["codigo"])).strip("-") or "ciclo"
