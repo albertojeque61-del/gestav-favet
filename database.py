@@ -37,9 +37,113 @@ if not SUPABASE_DB_URL:
     )
 
 
+# ----------------------------------------------------------------------
+# Ligações reutilizáveis. Abrir uma ligação nova ao Supabase demora meio
+# segundo ou mais; antes, cada consulta abria a sua e o relatório chegava
+# a abrir 100. Agora as ligações ficam num reservatório e são reutilizadas.
+# ----------------------------------------------------------------------
+import threading
+import time
+from psycopg2 import pool as _pg_pool
+
+_POOL = None
+_POOL_LOCK = threading.Lock()
+_ULTIMO_USO = {}          # id(conn) -> instante em que foi devolvida
+_VERIFICAR_APOS_S = 60    # testa ligações paradas há mais de 1 minuto
+
+
+def _pool():
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                _POOL = _pg_pool.ThreadedConnectionPool(
+                    1, 8, SUPABASE_DB_URL, cursor_factory=RealDictCursor,
+                    keepalives=1, keepalives_idle=30, keepalives_interval=10,
+                    keepalives_count=3)
+    return _POOL
+
+
+def _ligacao_viva(conn) -> bool:
+    if conn.closed:
+        return False
+    if time.time() - _ULTIMO_USO.get(id(conn), 0) < _VERIFICAR_APOS_S:
+        return True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.rollback()
+        return True
+    except Exception:
+        return False
+
+
+class _Ligacao:
+    """Comporta-se como a ligação do psycopg2. No fim do 'with' faz commit
+    (ou rollback, se houve erro) e devolve a ligação ao reservatório."""
+
+    def __init__(self, conn, reservatorio):
+        self._conn = conn
+        self._res = reservatorio
+        self._livre = False
+
+    def __getattr__(self, nome):
+        return getattr(self._conn, nome)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, tipo, valor, tb):
+        try:
+            if not self._conn.closed:
+                if tipo is None:
+                    self._conn.commit()
+                else:
+                    self._conn.rollback()
+        finally:
+            self._devolver()
+        return False
+
+    def close(self):
+        self._devolver()
+
+    def _devolver(self):
+        if self._livre:
+            return
+        self._livre = True
+        if self._res is None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            return
+        try:
+            if not self._conn.closed:
+                self._conn.rollback()
+            _ULTIMO_USO[id(self._conn)] = time.time()
+            self._res.putconn(self._conn, close=bool(self._conn.closed))
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self._devolver()
+        except Exception:
+            pass
+
+
 def conectar():
+    try:
+        res = _pool()
+        for _ in range(3):
+            conn = res.getconn()
+            if _ligacao_viva(conn):
+                return _Ligacao(conn, res)
+            res.putconn(conn, close=True)
+    except _pg_pool.PoolError:
+        pass  # reservatório cheio: usa uma ligação avulsa
     conn = psycopg2.connect(SUPABASE_DB_URL, cursor_factory=RealDictCursor)
-    return conn
+    return _Ligacao(conn, None)
 
 
 def ler_df(sql: str, conn, params=None):

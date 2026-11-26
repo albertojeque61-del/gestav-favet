@@ -3,10 +3,11 @@ Geração de relatórios em PDF (fpdf2).
 """
 
 import os
+import re
 from datetime import datetime
 from fpdf import FPDF
 
-from calculos import resumo_ciclo, semaforos, descrever_fim
+from calculos import resumo_ciclo, semaforos, descrever_fim, leitura_unica
 from sensibilidade import tabela_cenarios
 from database import conectar
 
@@ -67,6 +68,11 @@ class RelatorioPDF(FPDF):
 
 
 def gerar_relatorio_ciclo(ciclo_id: int) -> str:
+    with leitura_unica():
+        return _gerar_relatorio_ciclo(ciclo_id)
+
+
+def _gerar_relatorio_ciclo(ciclo_id: int) -> str:
     """Gera PDF completo do ciclo. Devolve o caminho do ficheiro."""
     os.makedirs(EXPORT_DIR, exist_ok=True)
 
@@ -279,7 +285,8 @@ def gerar_relatorio_ciclo(ciclo_id: int) -> str:
         pdf.multi_cell(0, 6, _sanitizar(ciclo["observacoes"]))
 
     # Guardar
-    nome_fich = f"ciclo_{ciclo['codigo']}_{datetime.now():%Y%m%d_%H%M}.pdf"
+    codigo_seguro = re.sub(r"[^A-Za-z0-9_-]+", "-", str(ciclo["codigo"])).strip("-") or "ciclo"
+    nome_fich = f"ciclo_{codigo_seguro}_{datetime.now():%Y%m%d_%H%M}.pdf"
     caminho = os.path.join(EXPORT_DIR, nome_fich)
     pdf.output(caminho)
     return caminho

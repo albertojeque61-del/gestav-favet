@@ -6,12 +6,46 @@ import statistics
 from datetime import date
 
 from database import conectar, obter_referencia
+import contextlib
+import functools
+
+# Durante um resumo ou relatório, as mesmas contas (peso vivo, custos,
+# receitas...) eram repetidas dezenas de vezes. Dentro de 'leitura_unica()'
+# cada resultado fica guardado até ao fim dessa leitura.
+import threading
+_LOCAL = threading.local()   # cada utilizador (fio) tem a sua memória
+
+
+@contextlib.contextmanager
+def leitura_unica():
+    dono = getattr(_LOCAL, "memo", None) is None
+    if dono:
+        _LOCAL.memo = {}
+    try:
+        yield
+    finally:
+        if dono:
+            _LOCAL.memo = None
+
+
+def _memo(f):
+    @functools.wraps(f)
+    def g(*args, **kw):
+        memo = getattr(_LOCAL, "memo", None)
+        if memo is None:
+            return f(*args, **kw)
+        chave = (f.__name__, args, tuple(sorted(kw.items())))
+        if chave not in memo:
+            memo[chave] = f(*args, **kw)
+        return memo[chave]
+    return g
 
 
 # ----------------------------------------------------------------------
 # Indicadores técnicos (zootécnicos)
 # ----------------------------------------------------------------------
 
+@_memo
 def mortalidade_acumulada(ciclo_id: int) -> dict:
     """Mortalidade total e percentagem acumulada (sobre as aves alojadas).
 
@@ -44,6 +78,7 @@ def mortalidade_acumulada(ciclo_id: int) -> dict:
     }
 
 
+@_memo
 def consumo_total_racao(ciclo_id: int) -> float:
     with conectar() as conn:
         cur = conn.cursor()
@@ -57,6 +92,7 @@ def consumo_total_racao(ciclo_id: int) -> float:
 RENDIMENTO_CARCACA = 0.72   # rendimento típico de carcaça; só se não houver pesagens
 
 
+@_memo
 def _ultima_pesagem(ciclo_id: int, ate: str = None, janela_dias: int = None):
     """Peso médio (g) da pesagem mais recente. Com 'ate', só conta pesagens
     até essa data e, com 'janela_dias', só as feitas nesses últimos dias
@@ -90,6 +126,7 @@ def _ultima_pesagem(ciclo_id: int, ate: str = None, janela_dias: int = None):
     return float(row["peso_medio_g"]) if row else None
 
 
+@_memo
 def peso_vivo_pavilhao(ciclo_id: int) -> float:
     """Peso vivo (kg) das aves que ainda estão no pavilhão."""
     peso_g = _ultima_pesagem(ciclo_id)
@@ -99,6 +136,7 @@ def peso_vivo_pavilhao(ciclo_id: int) -> float:
     return round(aves * peso_g / 1000.0, 2)
 
 
+@_memo
 def peso_vivo_vendido(ciclo_id: int) -> float:
     """Peso vivo (kg) das aves já vendidas. Nas vendas a peso vivo usa o peso
     da balança. Nas vendas em carcaça estima o peso vivo com a pesagem feita
@@ -124,12 +162,14 @@ def peso_vivo_vendido(ciclo_id: int) -> float:
     return round(total, 2)
 
 
+@_memo
 def peso_vivo_total(ciclo_id: int) -> float:
     """Peso vivo produzido no ciclo (kg): aves no pavilhão + aves vendidas.
     É a base da conversão alimentar e do custo por kg."""
     return round(peso_vivo_pavilhao(ciclo_id) + peso_vivo_vendido(ciclo_id), 2)
 
 
+@_memo
 def conversao_alimentar(ciclo_id: int) -> float:
     """CA = consumo total de ração / peso vivo produzido (Aviagen, 2018)."""
     peso = peso_vivo_total(ciclo_id)
@@ -139,6 +179,7 @@ def conversao_alimentar(ciclo_id: int) -> float:
     return round(consumo / peso, 3)
 
 
+@_memo
 def peso_inicial_pinto(ciclo_id: int) -> tuple[float, str]:
     """Peso do pinto ao alojamento: o valor registado no ciclo, senão a
     pesagem do dia 0, senão 42 g (valor típico de um pinto de 1 dia)."""
@@ -158,6 +199,7 @@ def peso_inicial_pinto(ciclo_id: int) -> tuple[float, str]:
     return 42.0, "valor padrão"
 
 
+@_memo
 def ganho_medio_diario(ciclo_id: int) -> dict:
     """GMD em g/dia desde o alojamento, usando a última pesagem."""
     with conectar() as conn:
@@ -181,12 +223,14 @@ def ganho_medio_diario(ciclo_id: int) -> dict:
     }
 
 
+@_memo
 def viabilidade(ciclo_id: int) -> float:
     """Viabilidade = 100% - mortalidade acumulada%."""
     m = mortalidade_acumulada(ciclo_id)
     return round(100 - m["pct"], 2)
 
 
+@_memo
 def iep(ciclo_id: int) -> float:
     """Índice de Eficiência Produtiva (European Production Index).
     IEP = (viabilidade × peso_vivo_médio_kg) / (idade_dias × ICA) × 100
@@ -208,6 +252,7 @@ def iep(ciclo_id: int) -> float:
 # Indicadores económicos
 # ----------------------------------------------------------------------
 
+@_memo
 def custos_totais(ciclo_id: int) -> dict:
     """Custos totais por tipo (variável/fixo) e por categoria."""
     with conectar() as conn:
@@ -236,6 +281,7 @@ def custos_totais(ciclo_id: int) -> dict:
     }
 
 
+@_memo
 def receitas_totais(ciclo_id: int) -> dict:
     with conectar() as conn:
         cur = conn.cursor()
@@ -283,6 +329,7 @@ def custo_por_ave(ciclo_id: int) -> float:
     return round(c / row["n_aves_alojadas"], 2)
 
 
+@_memo
 def margens(ciclo_id: int) -> dict:
     r = receitas_totais(ciclo_id)["receita"]
     c = custos_totais(ciclo_id)
@@ -301,6 +348,7 @@ def margens(ciclo_id: int) -> dict:
     }
 
 
+@_memo
 def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
     """Ponto de equilíbrio em kg: custos_fixos / (preco_kg - custo_variavel_por_kg).
     Assume preço médio das vendas registadas se não indicado."""
@@ -342,6 +390,11 @@ def ponto_equilibrio(ciclo_id: int, preco_kg_assumido: float = None) -> dict:
 # ----------------------------------------------------------------------
 
 def semaforos(ciclo_id: int) -> dict:
+    with leitura_unica():
+        return _semaforos(ciclo_id)
+
+
+def _semaforos(ciclo_id: int) -> dict:
     """Compara indicadores actuais com a referência da linhagem do ciclo.
     Devolve {indicador: (actual, referência, (cor, desvio_pct))}. Os
     indicadores sem valor de referência para essa linhagem são omitidos."""
@@ -405,6 +458,11 @@ def semaforos(ciclo_id: int) -> dict:
 
 def resumo_ciclo(ciclo_id: int) -> dict:
     """Resumo completo para dashboard, cartões e PDF."""
+    with leitura_unica():
+        return _resumo_ciclo(ciclo_id)
+
+
+def _resumo_ciclo(ciclo_id: int) -> dict:
     mort = mortalidade_acumulada(ciclo_id)
     gmd_info = ganho_medio_diario(ciclo_id)
     c = custos_totais(ciclo_id)

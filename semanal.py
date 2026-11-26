@@ -344,7 +344,7 @@ def pagina_registo_semanal(selecionar):
         st.download_button(
             "Ficha desta semana (com o ciclo)",
             data=gerar_ficha_semanal(ciclo, ini),
-            file_name=f"ficha_semanal_{ciclo['codigo']}_{ini:%Y%m%d}.pdf",
+            file_name=f"ficha_semanal_{str(ciclo['codigo']).replace('/', '-')}_{ini:%Y%m%d}.pdf",
             mime="application/pdf", icon=":material/print:", width="stretch",
         )
     with f2:

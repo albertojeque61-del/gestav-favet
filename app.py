@@ -1134,7 +1134,8 @@ def modulo_relatorios():
 
     if st.button("Gerar relatório em PDF", type="primary", icon=":material/picture_as_pdf:"):
         try:
-            caminho = gerar_relatorio_ciclo(cid)
+            with st.spinner("A preparar o relatório, aguarde alguns segundos..."):
+                caminho = gerar_relatorio_ciclo(cid)
             with open(caminho, "rb") as f:
                 st.download_button(
                     "Transferir PDF", data=f.read(),
